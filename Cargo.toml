@@ -1,0 +1,23 @@
+[package]
+name = "node"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+clap = { version = "4.5.40", features = ["derive", "env"] }
+ff = "0.13.1"
+halo2_gadgets = "0.3.1"
+halo2_poseidon = "0.1.0"
+halo2_proofs = "0.3.0"
+memmap2 = "0.9.5"
+opentelemetry = "0.30.0"
+opentelemetry_sdk = "0.30.0"
+pasta_curves = "0.5.1"
+primitive-types = "0.13.1"
+prost = "0.14.0"
+rand_core = "0.6.4"
+sha3 = "0.10.8"
+tokio = { version = "1.45.1", features = ["full"] }
+tonic = "0.13.1"
+tonic-build = "0.13.1"
+tonic-web = "0.13.1"
