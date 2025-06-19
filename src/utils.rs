@@ -1,4 +1,4 @@
-use anyhow::Context;
+use anyhow::{Context, Result};
 use curve25519_dalek::scalar::Scalar as Scalar25519;
 use ff::PrimeField;
 use pasta_curves::pallas::Scalar as ScalarPallas;
@@ -22,12 +22,12 @@ pub fn c25519_scalar_modulus() -> U256 {
     c25519_scalar_to_u256(max) + 1
 }
 
-pub fn u256_to_pallas_scalar(value: U256) -> anyhow::Result<ScalarPallas> {
+pub fn u256_to_pallas_scalar(value: U256) -> Result<ScalarPallas> {
     Ok(ScalarPallas::from_repr_vartime(value.to_little_endian())
         .context("invalid Pallas scalar")?)
 }
 
-pub fn u256_to_c25519_scalar(value: U256) -> anyhow::Result<Scalar25519> {
+pub fn u256_to_c25519_scalar(value: U256) -> Result<Scalar25519> {
     Ok(Scalar25519::from_canonical_bytes(value.to_little_endian())
         .into_option()
         .context("invalid Curve25519 scalar")?)
