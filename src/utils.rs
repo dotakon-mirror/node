@@ -22,6 +22,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_pallas_scalar_to_u256() {
+        let scalar = pallas::Scalar::from_raw([1u64, 2u64, 3u64, 4u64]);
+        let value = pallas_scalar_to_u256(scalar);
+        assert_eq!(
+            value.to_little_endian(),
+            [
+                1u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 2u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8,
+                3u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 4u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8
+            ]
+        );
+    }
+
+    #[test]
     fn test_pallas_scalar_modulus() {
         assert_eq!(
             format!("{:#x}", pallas_scalar_modulus()),
@@ -29,5 +42,20 @@ mod tests {
         );
     }
 
-    // TODO
+    #[test]
+    fn test_u256_to_pallas_scalar() {
+        let value = U256::from_little_endian(&[
+            4u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 3u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 2u8,
+            0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 1u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8,
+        ]);
+        let scalar = u256_to_pallas_scalar(value).unwrap();
+        assert_eq!(scalar, pallas::Scalar::from_raw([4u64, 3u64, 2u64, 1u64]));
+    }
+
+    #[test]
+    fn test_pallas_range() {
+        assert!(u256_to_pallas_scalar(pallas_scalar_modulus() - 1).is_ok());
+        assert!(u256_to_pallas_scalar(pallas_scalar_modulus()).is_err());
+        assert!(u256_to_pallas_scalar(pallas_scalar_modulus() + 1).is_err());
+    }
 }
