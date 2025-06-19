@@ -33,6 +33,14 @@ pub fn u256_to_c25519_scalar(value: U256) -> Result<Scalar25519> {
         .context("invalid Curve25519 scalar")?)
 }
 
+pub fn c25519_scalar_to_pallas_scalar(scalar: Scalar25519) -> ScalarPallas {
+    // Here it's okay to unwrap without checking because Pallas's order is greater than
+    // Curve25519's, so all canonical 25519 scalars are also canonical in Pallas and
+    // `from_repr_vartime` should never panic. If these assumptions don't hold we should definitely
+    // panic.
+    ScalarPallas::from_repr_vartime(scalar.to_bytes()).unwrap()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -120,5 +128,27 @@ mod tests {
         assert!(u256_to_c25519_scalar(c25519_scalar_modulus()).is_err());
         assert!(u256_to_c25519_scalar(c25519_scalar_modulus() + 1).is_err());
         assert!(u256_to_c25519_scalar(c25519_scalar_modulus() + 2).is_err());
+    }
+
+    #[test]
+    fn test_c25519_scalar_to_pallas_scalar() {
+        let bytes = [
+            4u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 3u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 2u8,
+            0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 1u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8,
+        ];
+        let value = Scalar25519::from_canonical_bytes(bytes).unwrap();
+        assert_eq!(
+            c25519_scalar_to_pallas_scalar(value),
+            ScalarPallas::from_repr_vartime(bytes).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_max_scalar() {
+        assert!(c25519_scalar_modulus() < pallas_scalar_modulus());
+        assert_eq!(
+            u256_to_pallas_scalar(c25519_scalar_modulus() - 1).unwrap(),
+            c25519_scalar_to_pallas_scalar(Scalar25519::ZERO - Scalar25519::ONE)
+        );
     }
 }
