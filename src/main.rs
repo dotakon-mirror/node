@@ -6,6 +6,7 @@ use tonic::transport::Server;
 
 mod keys;
 mod service;
+mod ssl;
 mod utils;
 
 pub mod dotakon {
@@ -51,10 +52,8 @@ struct Args {
 async fn main() -> Result<()> {
     let args = Args::parse();
 
-    let private_key_u256 = U256::from_str_radix(args.private_key.as_str(), 16)?;
-    let private_key = utils::u256_to_pallas_scalar(private_key_u256)?;
-
-    let key_manager = keys::KeyManager::new(private_key);
+    let private_key = U256::from_str_radix(args.private_key.as_str(), 16)?;
+    let key_manager = keys::KeyManager::new(private_key)?;
     let server = Server::builder().add_service(NodeServiceV1Server::new(
         service::NodeService::new(key_manager),
     ));

@@ -15,6 +15,10 @@ pub struct NodeService {
 impl NodeService {
     pub fn new(key_manager: keys::KeyManager) -> Self {
         println!("Public key: {:#x}", key_manager.public_key());
+        println!(
+            "Public key (Ed25519): {:#x}",
+            key_manager.public_key_25519()
+        );
         println!("Wallet address: {:#x}", key_manager.wallet_address());
         NodeService { key_manager }
     }
