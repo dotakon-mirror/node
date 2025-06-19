@@ -27,10 +27,6 @@ impl KeyManager {
         }
     }
 
-    pub fn private_key(&self) -> pallas::Scalar {
-        self._private_key
-    }
-
     pub fn public_key(&self) -> U256 {
         self._public_key
     }
