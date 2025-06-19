@@ -4,6 +4,7 @@ use dotakon::node_service_v1_server::NodeServiceV1Server;
 use primitive_types::U256;
 use tonic::transport::Server;
 
+mod keys;
 mod service;
 mod utils;
 
@@ -53,8 +54,9 @@ async fn main() -> Result<()> {
     let private_key_u256 = U256::from_str_radix(args.private_key.as_str(), 16)?;
     let private_key = utils::u256_to_pallas_scalar(private_key_u256)?;
 
+    let key_manager = keys::KeyManager::new(private_key);
     let server = Server::builder().add_service(NodeServiceV1Server::new(
-        service::NodeService::new(private_key),
+        service::NodeService::new(key_manager),
     ));
 
     let local_address = format!("{}:{}", args.local_address, args.port);
