@@ -3,10 +3,37 @@ use curve25519_dalek::{
     edwards::CompressedEdwardsY, edwards::EdwardsPoint as Point25519, scalar::Scalar as Scalar25519,
 };
 use ff::PrimeField;
+use oid_registry::{Oid, OidEntry, OidRegistry, asn1_rs::oid};
 use pasta_curves::{
     group::GroupEncoding, pallas::Point as PointPallas, pallas::Scalar as ScalarPallas,
 };
 use primitive_types::U256;
+
+pub const OID_DOTAKON_PALLAS_PUBLIC_KEY: Oid<'_> = oid!(1.3.6.1.4.1.71104.1);
+pub const OID_DOTAKON_IDENTITY_SIGNATURE_DUAL_SCHNORR: Oid<'_> = oid!(1.3.6.1.4.1.71104.2);
+
+/// Registers Dotakon's custom OIDs in the OID registry. We use custom OIDs to embed and recover
+/// custom fields in X.509 certificates, such as the node's public key on the Pallas curve which we
+/// use to authenticate the node.
+///
+/// Invoke this function only once at startup.
+pub fn register_oids() {
+    let mut registry = OidRegistry::default();
+    registry.insert(
+        OID_DOTAKON_PALLAS_PUBLIC_KEY,
+        OidEntry::new(
+            "dotakonPublicKeyOnPallas",
+            "Public key of a Dotakon node on the Pallas curve.",
+        ),
+    );
+    registry.insert(
+        OID_DOTAKON_IDENTITY_SIGNATURE_DUAL_SCHNORR,
+        OidEntry::new(
+            "dotakonDualSchnorrIdentitySignature",
+            "Authentication algorithm used in the Dotakon network (dual Schnorr signature).",
+        ),
+    );
+}
 
 pub fn pallas_scalar_to_u256(scalar: ScalarPallas) -> U256 {
     U256::from_little_endian(&scalar.to_repr())
@@ -54,14 +81,48 @@ pub fn decompress_point_pallas(point: U256) -> Result<PointPallas> {
         .context("invalid Pallas point")
 }
 
-pub fn compress_point_25519(point: &Point25519) -> U256 {
+pub fn compress_point_c25519(point: &Point25519) -> U256 {
     U256::from_big_endian(&point.compress().to_bytes())
 }
 
-pub fn decompress_point_25519(value: U256) -> Result<Point25519> {
+pub fn decompress_point_c25519(value: U256) -> Result<Point25519> {
     CompressedEdwardsY::from_slice(&value.to_big_endian())?
         .decompress()
         .context("invalid Curve25519 point")
+}
+
+/// TODO: make this production code.
+#[cfg(test)]
+fn make_test_keys(private_key: &str) -> (U256, U256, U256) {
+    use pasta_curves::group::Group;
+    let private_key = U256::from_str_radix(private_key, 16).unwrap();
+    let public_key_pallas = PointPallas::generator() * u256_to_pallas_scalar(private_key).unwrap();
+    let public_key_25519 = Point25519::mul_base(&u256_to_c25519_scalar(private_key).unwrap());
+    (
+        private_key,
+        compress_point_pallas(&public_key_pallas),
+        compress_point_c25519(&public_key_25519),
+    )
+}
+
+/// WARNING: FOR TESTS ONLY, DO NOT use these keys for anything else. They're leaked. If you create
+/// a wallet with this, all your funds will be permanently LOST.
+///
+/// The three returned components are: the private key, the public Pallas key, and the public
+/// Curve25519 key.
+#[cfg(test)]
+pub fn testing_keys1() -> (U256, U256, U256) {
+    make_test_keys("0xb0276914bf0f850d27771adb1abb62b2674e041b63c86c8cd0d7520355ae7c0".into())
+}
+
+/// WARNING: DO NOT use this private key for anything. It's leaked. If you create a wallet with
+/// this, all your funds will be permanently LOST.
+///
+/// The three returned components are: the private key, the public Pallas key, and the public
+/// Curve25519 key.
+#[cfg(test)]
+pub fn testing_keys2() -> (U256, U256, U256) {
+    make_test_keys("0xfc56ce55997c46f1ba0bce9a8a4daead405c29edf4066a2cd7d0419f592392b".into())
 }
 
 #[cfg(test)]
@@ -197,8 +258,8 @@ mod tests {
     #[test]
     fn test_compress_point_25519_1() {
         let point = Point25519::mul_base(&Scalar25519::ONE);
-        let compressed = compress_point_25519(&point);
-        assert_eq!(point, decompress_point_25519(compressed).unwrap());
+        let compressed = compress_point_c25519(&point);
+        assert_eq!(point, decompress_point_c25519(compressed).unwrap());
     }
 
     #[test]
@@ -209,7 +270,7 @@ mod tests {
         ])
         .unwrap();
         let point = Point25519::mul_base(&scalar);
-        let compressed = compress_point_25519(&point);
-        assert_eq!(point, decompress_point_25519(compressed).unwrap());
+        let compressed = compress_point_c25519(&point);
+        assert_eq!(point, decompress_point_c25519(compressed).unwrap());
     }
 }

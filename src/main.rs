@@ -56,6 +56,8 @@ struct Args {
 async fn main() -> Result<()> {
     let args = Args::parse();
 
+    utils::register_oids();
+
     let private_key = if args.private_key.is_empty() {
         let mut bytes = [0u8; 32];
         OsRng.try_fill_bytes(&mut bytes)?;

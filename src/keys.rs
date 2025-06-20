@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use curve25519_dalek::{EdwardsPoint as Point25519, scalar::Scalar as Scalar25519};
 use pasta_curves::{group::Group, pallas::Point as PointPallas, pallas::Scalar as ScalarPallas};
 use primitive_types::U256;
@@ -27,7 +27,7 @@ impl KeyManager {
         let public_key_pallas = utils::compress_point_pallas(&public_key_point_pallas);
 
         let public_key_point_25519 = Point25519::mul_base(&private_key_25519);
-        let public_key_25519 = utils::compress_point_25519(&public_key_point_25519);
+        let public_key_25519 = utils::compress_point_c25519(&public_key_point_25519);
 
         let mut hasher = Sha3_256::new();
         hasher.update(public_key_pallas.to_little_endian());
@@ -65,9 +65,9 @@ impl KeyManager {
             "{{domain=\"{}\",public_key_pallas=0x{:#x},public_key_c25519=0x{:#x},nonce_pallas=0x{:#x},nonce_c25519=0x{:#x}}}",
             Self::SCHNORR_IDENTITY_PROOF_DOMAIN_SEPARATOR,
             utils::compress_point_pallas(public_key_pallas),
-            utils::compress_point_25519(public_key_25519),
+            utils::compress_point_c25519(public_key_25519),
             utils::compress_point_pallas(nonce_point_pallas),
-            utils::compress_point_25519(nonce_point_25519),
+            utils::compress_point_c25519(nonce_point_25519),
         );
         let mut hasher = Sha3_256::new();
         hasher.update(message.as_bytes());
@@ -116,7 +116,7 @@ impl KeyManager {
         nonce_25519: &Point25519,
         signature_pallas: ScalarPallas,
         signature_25519: Scalar25519,
-    ) -> bool {
+    ) -> Result<()> {
         let challenge_25519 = Self::make_public_key_identity_challenge(
             &public_key_pallas,
             &public_key_25519,
@@ -124,9 +124,14 @@ impl KeyManager {
             &nonce_25519,
         );
         let challenge_pallas = utils::c25519_scalar_to_pallas_scalar(challenge_25519);
-        (Point25519::mul_base(&signature_25519) == nonce_25519 + public_key_25519 * challenge_25519)
-            && (PointPallas::generator() * signature_pallas
-                == nonce_pallas + public_key_pallas * challenge_pallas)
+        if (Point25519::mul_base(&signature_25519)
+            != nonce_25519 + public_key_25519 * challenge_25519)
+            || (PointPallas::generator() * signature_pallas
+                != nonce_pallas + public_key_pallas * challenge_pallas)
+        {
+            return Err(anyhow!("invalid signature"));
+        }
+        Ok(())
     }
 }
 
@@ -161,12 +166,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_key_identity_proof() {
-        let private_key = U256::from_little_endian(&[
-            8u8, 7, 6, 5, 4, 3, 2, 1, 16, 15, 14, 13, 12, 11, 10, 9, 24, 23, 22, 21, 20, 19, 18,
-            17, 32, 31, 30, 29, 28, 27, 0, 0,
-        ]);
+    fn test_key_identity_proof(private_key: U256) {
         let key_manager = KeyManager::new(private_key).unwrap();
         let (r1, r2, s1, s2) = key_manager.prove_public_key_identity(
             Scalar25519::from_canonical_bytes([
@@ -175,13 +175,53 @@ mod tests {
             ])
             .unwrap(),
         );
-        assert!(KeyManager::verify_public_key_identity(
-            &key_manager.public_key_point_pallas,
-            &key_manager.public_key_point_25519,
-            &r1,
-            &r2,
-            s1,
-            s2
-        ));
+        assert!(
+            KeyManager::verify_public_key_identity(
+                &key_manager.public_key_point_pallas,
+                &key_manager.public_key_point_25519,
+                &r1,
+                &r2,
+                s1,
+                s2
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_key_identity_proof1() {
+        let (private_key, _, _) = utils::testing_keys1();
+        test_key_identity_proof(private_key);
+    }
+
+    #[test]
+    fn test_key_identity_proof2() {
+        let (private_key, _, _) = utils::testing_keys2();
+        test_key_identity_proof(private_key);
+    }
+
+    #[test]
+    fn test_key_identity_proof_failure() {
+        let (private_key1, _, _) = utils::testing_keys1();
+        let key_manager1 = KeyManager::new(private_key1).unwrap();
+        let (private_key2, _, _) = utils::testing_keys2();
+        let key_manager2 = KeyManager::new(private_key2).unwrap();
+        let nonce = Scalar25519::from_canonical_bytes([
+            1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+            24, 25, 26, 27, 28, 29, 30, 0, 0,
+        ])
+        .unwrap();
+        let (r1, r2, s1, s2) = key_manager1.prove_public_key_identity(nonce);
+        assert!(
+            !KeyManager::verify_public_key_identity(
+                &key_manager2.public_key_point_pallas,
+                &key_manager2.public_key_point_25519,
+                &r1,
+                &r2,
+                s1,
+                s2
+            )
+            .is_ok()
+        );
     }
 }
