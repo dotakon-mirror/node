@@ -12,6 +12,7 @@ halo2_gadgets = "0.3.1"
 halo2_poseidon = "0.1.0"
 halo2_proofs = "0.3.0"
 memmap2 = "0.9.5"
+oid-registry = "0.8.1"
 opentelemetry = "0.30.0"
 opentelemetry_sdk = "0.30.0"
 pasta_curves = "0.5.1"
@@ -25,6 +26,7 @@ tokio = { version = "1.45.1", features = ["full"] }
 tokio-stream = "0.1.17"
 tonic = "0.13.1"
 tonic-web = "0.13.1"
+x509-parser = "0.17.0"
 
 [build-dependencies]
 tonic-build = "0.13.1"

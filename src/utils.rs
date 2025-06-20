@@ -1,7 +1,11 @@
 use anyhow::{Context, Result};
-use curve25519_dalek::scalar::Scalar as Scalar25519;
+use curve25519_dalek::{
+    edwards::CompressedEdwardsY, edwards::EdwardsPoint as Point25519, scalar::Scalar as Scalar25519,
+};
 use ff::PrimeField;
-use pasta_curves::pallas::Scalar as ScalarPallas;
+use pasta_curves::{
+    group::GroupEncoding, pallas::Point as PointPallas, pallas::Scalar as ScalarPallas,
+};
 use primitive_types::U256;
 
 pub fn pallas_scalar_to_u256(scalar: ScalarPallas) -> U256 {
@@ -23,14 +27,13 @@ pub fn c25519_scalar_modulus() -> U256 {
 }
 
 pub fn u256_to_pallas_scalar(value: U256) -> Result<ScalarPallas> {
-    Ok(ScalarPallas::from_repr_vartime(value.to_little_endian())
-        .context("invalid Pallas scalar")?)
+    ScalarPallas::from_repr_vartime(value.to_little_endian()).context("invalid Pallas scalar")
 }
 
 pub fn u256_to_c25519_scalar(value: U256) -> Result<Scalar25519> {
-    Ok(Scalar25519::from_canonical_bytes(value.to_little_endian())
+    Scalar25519::from_canonical_bytes(value.to_little_endian())
         .into_option()
-        .context("invalid Curve25519 scalar")?)
+        .context("invalid Curve25519 scalar")
 }
 
 pub fn c25519_scalar_to_pallas_scalar(scalar: Scalar25519) -> ScalarPallas {
@@ -41,8 +44,30 @@ pub fn c25519_scalar_to_pallas_scalar(scalar: Scalar25519) -> ScalarPallas {
     ScalarPallas::from_repr_vartime(scalar.to_bytes()).unwrap()
 }
 
+pub fn compress_point_pallas(point: &PointPallas) -> U256 {
+    U256::from_big_endian(&point.to_bytes())
+}
+
+pub fn decompress_point_pallas(point: U256) -> Result<PointPallas> {
+    PointPallas::from_bytes(&point.to_big_endian())
+        .into_option()
+        .context("invalid Pallas point")
+}
+
+pub fn compress_point_25519(point: &Point25519) -> U256 {
+    U256::from_big_endian(&point.compress().to_bytes())
+}
+
+pub fn decompress_point_25519(value: U256) -> Result<Point25519> {
+    CompressedEdwardsY::from_slice(&value.to_big_endian())?
+        .decompress()
+        .context("invalid Curve25519 point")
+}
+
 #[cfg(test)]
 mod tests {
+    use pasta_curves::group::Group;
+
     use super::*;
 
     #[test]
@@ -150,5 +175,41 @@ mod tests {
             u256_to_pallas_scalar(c25519_scalar_modulus() - 1).unwrap(),
             c25519_scalar_to_pallas_scalar(Scalar25519::ZERO - Scalar25519::ONE)
         );
+    }
+
+    #[test]
+    fn test_compress_point_pallas1() {
+        let compressed = compress_point_pallas(&PointPallas::generator());
+        assert_eq!(
+            PointPallas::generator(),
+            decompress_point_pallas(compressed).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_compress_point_pallas2() {
+        let scalar = ScalarPallas::from_raw([42u64, 0, 0, 0]);
+        let point = PointPallas::generator() * scalar;
+        let compressed = compress_point_pallas(&point);
+        assert_eq!(point, decompress_point_pallas(compressed).unwrap());
+    }
+
+    #[test]
+    fn test_compress_point_25519_1() {
+        let point = Point25519::mul_base(&Scalar25519::ONE);
+        let compressed = compress_point_25519(&point);
+        assert_eq!(point, decompress_point_25519(compressed).unwrap());
+    }
+
+    #[test]
+    fn test_compress_point_25519_2() {
+        let scalar = Scalar25519::from_canonical_bytes([
+            42u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0,
+        ])
+        .unwrap();
+        let point = Point25519::mul_base(&scalar);
+        let compressed = compress_point_25519(&point);
+        assert_eq!(point, decompress_point_25519(compressed).unwrap());
     }
 }
