@@ -305,6 +305,32 @@ mod tests {
         test_remote_key_pair_public_key(secret_key, public_key);
     }
 
+    fn test_remote_key_pair_signature(secret_key: U256, public_key: U256) {
+        let key_manager = KeyManager::new(secret_key).unwrap();
+        let message = "SATOR AREPO TENET OPERA ROTAS";
+        let signature = key_manager
+            .as_remote_ed25519_key_pair()
+            .sign(message.as_bytes())
+            .unwrap();
+        let mut signature_bytes = [0u8; ed25519_dalek::SIGNATURE_LENGTH];
+        signature_bytes.copy_from_slice(signature.as_slice());
+        assert!(
+            KeyManager::verify_ed25519(public_key, message.as_bytes(), &signature_bytes).is_ok()
+        );
+    }
+
+    #[test]
+    fn test_remote_key_pair_signature1() {
+        let (secret_key, _, public_key) = utils::testing_keys1();
+        test_remote_key_pair_signature(secret_key, public_key);
+    }
+
+    #[test]
+    fn test_remote_key_pair_signature2() {
+        let (secret_key, _, public_key) = utils::testing_keys2();
+        test_remote_key_pair_signature(secret_key, public_key);
+    }
+
     fn test_key_identity_proof(secret_key: U256) {
         let key_manager = KeyManager::new(secret_key).unwrap();
         let (r1, r2, s1, s2) = key_manager.prove_public_key_identity(
