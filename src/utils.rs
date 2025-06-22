@@ -92,32 +92,36 @@ pub fn decompress_point_c25519(value: U256) -> Result<Point25519> {
 
 /// TODO: make this production code.
 #[cfg(test)]
-fn make_test_keys(private_key: &str) -> (U256, U256, U256) {
+fn make_test_keys(secret_key: &str) -> (U256, U256, U256) {
+    use ed25519_dalek;
     use pasta_curves::group::Group;
-    let private_key = U256::from_str_radix(private_key, 16).unwrap();
-    let public_key_pallas = PointPallas::generator() * u256_to_pallas_scalar(private_key).unwrap();
-    let public_key_25519 = Point25519::mul_base(&u256_to_c25519_scalar(private_key).unwrap());
+    let secret_key = U256::from_str_radix(secret_key, 16).unwrap();
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&secret_key.to_little_endian());
+    let private_key_25519 = signing_key.to_scalar();
+    let public_key_pallas =
+        PointPallas::generator() * c25519_scalar_to_pallas_scalar(private_key_25519);
+    let public_key_25519 = Point25519::mul_base(&private_key_25519);
     (
-        private_key,
+        secret_key,
         compress_point_pallas(&public_key_pallas),
         compress_point_c25519(&public_key_25519),
     )
 }
 
-/// WARNING: FOR TESTS ONLY, DO NOT use these keys for anything else. They're leaked. If you create
-/// a wallet with this, all your funds will be permanently LOST.
+/// WARNING: FOR TESTS ONLY, DO NOT use this key for anything else. They're leaked. If you create a
+/// wallet with this, all your funds will be permanently LOST.
 ///
-/// The three returned components are: the private key, the public Pallas key, and the public
+/// The three returned components are: the secret key, the public Pallas key, and the public
 /// Curve25519 key.
 #[cfg(test)]
 pub fn testing_keys1() -> (U256, U256, U256) {
     make_test_keys("0xb0276914bf0f850d27771adb1abb62b2674e041b63c86c8cd0d7520355ae7c0".into())
 }
 
-/// WARNING: DO NOT use this private key for anything. It's leaked. If you create a wallet with
-/// this, all your funds will be permanently LOST.
+/// WARNING: FOR TESTS ONLY, DO NOT use this key for anything else. They're leaked. If you create a
+/// wallet with this, all your funds will be permanently LOST.
 ///
-/// The three returned components are: the private key, the public Pallas key, and the public
+/// The three returned components are: the secret key, the public Pallas key, and the public
 /// Curve25519 key.
 #[cfg(test)]
 pub fn testing_keys2() -> (U256, U256, U256) {
