@@ -17,8 +17,7 @@ pub const OID_DOTAKON_IDENTITY_SIGNATURE_DUAL_SCHNORR: Oid<'_> = oid!(1.3.6.1.4.
 /// use to authenticate the node.
 ///
 /// Invoke this function only once at startup.
-pub fn register_oids() {
-    let mut registry = OidRegistry::default();
+pub fn register_oids(registry: &mut OidRegistry) {
     registry.insert(
         OID_DOTAKON_PALLAS_PUBLIC_KEY,
         OidEntry::new(
@@ -130,6 +129,23 @@ mod tests {
     use pasta_curves::group::Group;
 
     use super::*;
+
+    #[test]
+    fn test_custom_oids() {
+        let mut registry = OidRegistry::default();
+        register_oids(&mut registry);
+        assert_eq!(
+            registry.get(&OID_DOTAKON_PALLAS_PUBLIC_KEY).unwrap().sn(),
+            "dotakonPublicKeyOnPallas"
+        );
+        assert_eq!(
+            registry
+                .get(&OID_DOTAKON_IDENTITY_SIGNATURE_DUAL_SCHNORR)
+                .unwrap()
+                .sn(),
+            "dotakonDualSchnorrIdentitySignature"
+        );
+    }
 
     #[test]
     fn test_pallas_scalar_to_u256() {

@@ -22,7 +22,7 @@ struct Args {
     /// will be empty and so the node won't be able to join an existing network, it will have to
     /// start a new one.
     #[arg(long, default_value = "")]
-    private_key: String,
+    secret_key: String,
 
     /// The canonical address of this node. It may be an IPv4 address, an IPv6 address, or a DNS
     /// address. The gRPC server must be reachable at this address at all times.
@@ -56,22 +56,18 @@ struct Args {
 async fn main() -> Result<()> {
     let args = Args::parse();
 
-    utils::register_oids();
-
-    let private_key = if args.private_key.is_empty() {
+    let secret_key = if args.secret_key.is_empty() {
         let mut bytes = [0u8; 32];
         OsRng.try_fill_bytes(&mut bytes)?;
-        bytes[31] &= 0x0F;
         let key = U256::from_little_endian(&bytes);
-        println!("New private key: {:#x}", key);
+        println!("New secret key: {:#x}", key);
         key
     } else {
-        U256::from_str_radix(args.private_key.as_str(), 16)?
+        U256::from_str_radix(args.secret_key.as_str(), 16)?
     };
 
-    let key_manager = keys::KeyManager::new(private_key)?;
     let server = Server::builder().add_service(NodeServiceV1Server::new(
-        service::NodeService::new(key_manager),
+        service::NodeService::new(keys::KeyManager::new(secret_key)?),
     ));
 
     let local_address = format!("{}:{}", args.local_address, args.port);

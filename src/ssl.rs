@@ -128,7 +128,7 @@ impl CertificateVerifier {
         })
     }
 
-    pub fn verify_certificate(
+    fn verify_certificate(
         &self,
         end_entity: &rustls::pki_types::CertificateDer<'_>,
         now: rustls::pki_types::UnixTime,
