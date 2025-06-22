@@ -195,6 +195,8 @@ impl KeyManager {
 mod tests {
     use super::*;
 
+    use rcgen::RemoteKeyPair;
+
     #[test]
     fn test_key_manager() {
         let private_key = U256::from_little_endian(&[
@@ -268,6 +270,39 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    #[test]
+    fn test_remote_key_pair_algorithm() {
+        let (secret_key, _, _) = utils::testing_keys1();
+        let key_manager = KeyManager::new(secret_key).unwrap();
+        assert_eq!(
+            *(key_manager.as_remote_ed25519_key_pair().algorithm()),
+            rcgen::PKCS_ED25519
+        );
+    }
+
+    fn test_remote_key_pair_public_key(secret_key: U256, public_key: U256) {
+        let key_manager = KeyManager::new(secret_key).unwrap();
+        assert_eq!(
+            key_manager
+                .as_remote_ed25519_key_pair()
+                .public_key()
+                .to_vec(),
+            public_key.to_big_endian()
+        );
+    }
+
+    #[test]
+    fn test_remote_key_pair_public_key1() {
+        let (secret_key, _, public_key) = utils::testing_keys1();
+        test_remote_key_pair_public_key(secret_key, public_key);
+    }
+
+    #[test]
+    fn test_remote_key_pair_public_key2() {
+        let (secret_key, _, public_key) = utils::testing_keys2();
+        test_remote_key_pair_public_key(secret_key, public_key);
     }
 
     fn test_key_identity_proof(secret_key: U256) {
