@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use anyhow::Result;
 use dotakon::node_service_v1_server::NodeServiceV1;
 use std::pin::Pin;
@@ -6,20 +8,24 @@ use tonic::{Request, Response, Status, Streaming};
 
 use crate::dotakon;
 use crate::keys;
+use crate::utils;
 
 #[derive(Debug)]
 pub struct NodeService {
-    key_manager: keys::KeyManager,
+    key_manager: Arc<keys::KeyManager>,
 }
 
 impl NodeService {
-    pub fn new(key_manager: keys::KeyManager) -> Self {
+    pub fn new(key_manager: Arc<keys::KeyManager>) -> Self {
         println!("Public key: {:#x}", key_manager.public_key());
         println!(
             "Public key (Ed25519): {:#x}",
             key_manager.public_key_25519()
         );
-        println!("Wallet address: {:#x}", key_manager.wallet_address());
+        println!(
+            "Wallet address: {}",
+            utils::format_wallet_address(key_manager.wallet_address())
+        );
         NodeService { key_manager }
     }
 }

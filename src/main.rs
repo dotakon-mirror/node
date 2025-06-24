@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use anyhow::Result;
 use clap::Parser;
 use dotakon::node_service_v1_server::NodeServiceV1Server;
@@ -52,22 +54,33 @@ struct Args {
     bootstrap_list: Vec<String>,
 }
 
+fn get_random() -> Result<U256> {
+    let mut bytes = [0u8; 32];
+    OsRng.try_fill_bytes(&mut bytes)?;
+    Ok(U256::from_little_endian(&bytes))
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
 
     let secret_key = if args.secret_key.is_empty() {
-        let mut bytes = [0u8; 32];
-        OsRng.try_fill_bytes(&mut bytes)?;
-        let key = U256::from_little_endian(&bytes);
+        let key = get_random()?;
         println!("New secret key: {:#x}", key);
         key
     } else {
         U256::from_str_radix(args.secret_key.as_str(), 16)?
     };
 
+    let key_manager = Arc::new(keys::KeyManager::new(secret_key)?);
+    ssl::generate_certificate(
+        key_manager.clone(),
+        args.public_address,
+        /*nonce=*/ get_random()?,
+    )?;
+
     let server = Server::builder().add_service(NodeServiceV1Server::new(
-        service::NodeService::new(keys::KeyManager::new(secret_key)?),
+        service::NodeService::new(key_manager),
     ));
 
     let local_address = format!("{}:{}", args.local_address, args.port);

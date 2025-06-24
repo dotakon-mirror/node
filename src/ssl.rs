@@ -1,41 +1,86 @@
-use anyhow::Context;
-use curve25519_dalek::{EdwardsPoint as Point25519, Scalar as Scalar25519};
+use std::sync::Arc;
+
+use anyhow::{self, Context};
+use curve25519_dalek::{EdwardsPoint as Point25519, Scalar as Scalar25519, scalar::clamp_integer};
 use ed25519_dalek::{self, Verifier};
-use pasta_curves::{
-    group::GroupEncoding, pallas::Point as PointPallas, pallas::Scalar as ScalarPallas,
-};
+use pasta_curves::{group::GroupEncoding, pallas::Point as PointPallas};
 use primitive_types::U256;
+use rcgen;
 use rustls::{
     SignatureScheme, client::danger::ServerCertVerifier, server::danger::ClientCertVerifier,
 };
-use x509_parser::{self, prelude::X509Certificate};
+use time::{Duration, OffsetDateTime};
+use x509_parser::{self, certificate::X509Certificate};
 
 use crate::keys;
 use crate::utils;
 
-#[derive(Debug)]
-struct DualSchnorrSignature {
-    nonce_pallas: PointPallas,
-    nonce_25519: Point25519,
-    signature_pallas: ScalarPallas,
-    signature_25519: Scalar25519,
+pub fn generate_certificate(
+    key_manager: Arc<keys::KeyManager>,
+    canonical_address: String,
+    secret_nonce: U256,
+) -> anyhow::Result<rcgen::Certificate> {
+    let remote_key_pair: Box<dyn rcgen::RemoteKeyPair + Send + Sync> =
+        Box::new(keys::RemoteEd25519KeyPair::from(key_manager.clone()));
+    let key_pair = rcgen::KeyPair::from_remote(remote_key_pair)?;
+
+    let mut params = rcgen::CertificateParams::new(vec![canonical_address])?;
+
+    let now = OffsetDateTime::now_utc();
+    params.not_before = now - Duration::days(1);
+    params.not_after = now + Duration::days(365);
+
+    let wallet_address = utils::format_wallet_address(key_manager.wallet_address());
+    params.distinguished_name = rcgen::DistinguishedName::new();
+    params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, wallet_address);
+
+    params.is_ca = rcgen::IsCa::ExplicitNoCa;
+
+    let public_key_oid: Vec<u64> = utils::OID_DOTAKON_PALLAS_PUBLIC_KEY
+        .iter()
+        .unwrap()
+        .collect();
+    params
+        .custom_extensions
+        .push(rcgen::CustomExtension::from_oid_content(
+            public_key_oid.as_slice(),
+            key_manager.public_key().to_big_endian().to_vec(),
+        ));
+
+    let signature = key_manager.prove_public_key_identity(Scalar25519::from_bytes_mod_order(
+        clamp_integer(secret_nonce.to_little_endian()),
+    ));
+    let identity_signature_oid: Vec<u64> = utils::OID_DOTAKON_IDENTITY_SIGNATURE_DUAL_SCHNORR
+        .iter()
+        .unwrap()
+        .collect();
+    params
+        .custom_extensions
+        .push(rcgen::CustomExtension::from_oid_content(
+            identity_signature_oid.as_slice(),
+            signature.encode(),
+        ));
+
+    Ok(params.self_signed(&key_pair)?)
+}
+
+fn get_cert_not_before(certificate: &X509Certificate) -> u64 {
+    certificate.tbs_certificate.validity.not_before.timestamp() as u64
+}
+
+fn get_cert_not_after(certificate: &X509Certificate) -> u64 {
+    certificate.tbs_certificate.validity.not_after.timestamp() as u64
 }
 
 #[derive(Debug, Clone)]
 struct CertificateVerifier {}
 
 impl CertificateVerifier {
-    fn cert_not_before(certificate: &X509Certificate) -> u64 {
-        certificate.tbs_certificate.validity.not_before.timestamp() as u64
-    }
-
-    fn cert_not_after(certificate: &X509Certificate) -> u64 {
-        certificate.tbs_certificate.validity.not_after.timestamp() as u64
-    }
-
-    fn recover_c25519_public_key(
+    fn recover_c25519_public_key_bytes(
         certificate: &X509Certificate,
-    ) -> Result<Point25519, rustls::Error> {
+    ) -> Result<Vec<u8>, rustls::Error> {
         let public_key = certificate
             .tbs_certificate
             .subject_pki
@@ -43,18 +88,27 @@ impl CertificateVerifier {
             .map_err(|_| {
                 rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding)
             })?;
-        let ec_point = match public_key {
-            x509_parser::public_key::PublicKey::EC(point) => Ok(point),
+        let bytes = match public_key {
+            // NOTE: the x509_parser doesn't handle Ed25519 keys yet, so our Ed25519 keys show up as
+            // "unknown".
+            x509_parser::public_key::PublicKey::Unknown(bytes) => Ok(bytes),
             _ => Err(rustls::Error::InvalidCertificate(
                 rustls::CertificateError::UnsupportedSignatureAlgorithm,
             )),
         }?;
-        if ec_point.key_size() != 32 {
+        if bytes.len() != 32 {
             return Err(rustls::Error::InvalidCertificate(
                 rustls::CertificateError::BadEncoding,
             ));
         }
-        utils::decompress_point_c25519(U256::from_big_endian(ec_point.data()))
+        Ok(bytes.to_vec())
+    }
+
+    fn recover_c25519_public_key(
+        certificate: &X509Certificate,
+    ) -> Result<Point25519, rustls::Error> {
+        let bytes = Self::recover_c25519_public_key_bytes(certificate)?;
+        utils::decompress_point_c25519(U256::from_big_endian(bytes.as_slice()))
             .map_err(|_| rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding))
     }
 
@@ -85,7 +139,7 @@ impl CertificateVerifier {
 
     fn recover_identity_signature(
         certificate: &X509Certificate,
-    ) -> Result<DualSchnorrSignature, rustls::Error> {
+    ) -> Result<utils::DualSchnorrSignature, rustls::Error> {
         let extensions = certificate.extensions_map().map_err(|_| {
             rustls::Error::General("identity signature not found in X.509 certificate".into())
         })?;
@@ -98,34 +152,12 @@ impl CertificateVerifier {
                 rustls::CertificateError::BadEncoding,
             ));
         }
-
-        let nonce_pallas =
-            utils::decompress_point_pallas(U256::from_big_endian(&extension.value[0..32]))
-                .map_err(|_| {
-                    rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding)
-                })?;
-        let nonce_25519 =
-            utils::decompress_point_c25519(U256::from_big_endian(&extension.value[32..64]))
-                .map_err(|_| {
-                    rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding)
-                })?;
-        let signature_pallas =
-            utils::u256_to_pallas_scalar(U256::from_little_endian(&extension.value[64..96]))
-                .map_err(|_| {
-                    rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding)
-                })?;
-        let signature_25519 =
-            utils::u256_to_c25519_scalar(U256::from_little_endian(&extension.value[96..128]))
-                .map_err(|_| {
-                    rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding)
-                })?;
-
-        Ok(DualSchnorrSignature {
-            nonce_pallas,
-            nonce_25519,
-            signature_pallas,
-            signature_25519,
-        })
+        let mut bytes = [0u8; 128];
+        bytes.copy_from_slice(extension.value);
+        let signature = utils::DualSchnorrSignature::decode(&bytes).map_err(|_| {
+            rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding)
+        })?;
+        Ok(signature)
     }
 
     fn verify_certificate(
@@ -133,17 +165,16 @@ impl CertificateVerifier {
         end_entity: &rustls::pki_types::CertificateDer<'_>,
         now: rustls::pki_types::UnixTime,
     ) -> Result<(), rustls::Error> {
-        let (_, certificate) =
-            x509_parser::parse_x509_certificate(end_entity.as_ref()).map_err(|_| {
-                rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding)
-            })?;
+        let (_, certificate) = x509_parser::parse_x509_certificate(end_entity).map_err(|_| {
+            rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding)
+        })?;
 
-        if now.as_secs() < Self::cert_not_before(&certificate) {
+        if now.as_secs() < get_cert_not_before(&certificate) {
             return Err(rustls::Error::InvalidCertificate(
                 rustls::CertificateError::NotValidYet,
             ));
         }
-        if now.as_secs() > Self::cert_not_after(&certificate) {
+        if now.as_secs() > get_cert_not_after(&certificate) {
             return Err(rustls::Error::InvalidCertificate(
                 rustls::CertificateError::Expired,
             ));
@@ -156,10 +187,7 @@ impl CertificateVerifier {
         keys::KeyManager::verify_public_key_identity(
             &public_key_pallas,
             &public_key_25519,
-            &signature.nonce_pallas,
-            &signature.nonce_25519,
-            signature.signature_pallas,
-            signature.signature_25519,
+            &signature,
         )
         .map_err(|_| rustls::Error::InvalidCertificate(rustls::CertificateError::BadSignature))?;
 
@@ -183,26 +211,10 @@ impl CertificateVerifier {
                 rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding)
             })?;
 
-        let public_key = parsed_certificate
-            .tbs_certificate
-            .subject_pki
-            .parsed()
-            .map_err(|_| {
-                rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding)
-            })?;
-        let ec_point = match public_key {
-            x509_parser::public_key::PublicKey::EC(point) => Ok(point),
-            _ => Err(rustls::Error::InvalidCertificate(
-                rustls::CertificateError::UnsupportedSignatureAlgorithm,
-            )),
-        }?;
-        if ec_point.key_size() != ed25519_dalek::PUBLIC_KEY_LENGTH {
-            return Err(rustls::Error::InvalidCertificate(
-                rustls::CertificateError::BadEncoding,
-            ));
-        }
         let mut public_key_bytes = [0u8; ed25519_dalek::PUBLIC_KEY_LENGTH];
-        public_key_bytes.copy_from_slice(ec_point.data());
+        public_key_bytes.copy_from_slice(
+            Self::recover_c25519_public_key_bytes(&parsed_certificate)?.as_slice(),
+        );
         let verifying_key =
             ed25519_dalek::VerifyingKey::from_bytes(&public_key_bytes).map_err(|_| {
                 rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding)
@@ -355,6 +367,102 @@ impl ServerCertVerifier for DotakonServerCertVerifier {
 mod tests {
     use super::*;
 
+    use oid_registry;
+    use tokio::{
+        self,
+        io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt},
+    };
+
+    #[test]
+    fn test_certificate_generation() {
+        let (secret_key, public_key_pallas, public_key_25519, wallet_address) =
+            utils::testing_keys1();
+        let key_manager = Arc::new(keys::KeyManager::new(secret_key).unwrap());
+        let nonce = U256::from_little_endian(&[
+            1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+            24, 25, 26, 27, 28, 29, 30, 0, 0,
+        ]);
+        let certificate =
+            generate_certificate(key_manager.clone(), "110.120.130.140".to_string(), nonce)
+                .unwrap();
+        let (_, parsed) = x509_parser::parse_x509_certificate(certificate.der()).unwrap();
+        let common_names: Vec<&x509_parser::x509::AttributeTypeAndValue> =
+            parsed.subject().iter_common_name().collect();
+        assert_eq!(common_names.len(), 1);
+        assert_eq!(
+            common_names[0].attr_value().clone().string().unwrap(),
+            utils::format_wallet_address(wallet_address)
+        );
+        assert_eq!(
+            parsed.tbs_certificate.signature.algorithm,
+            oid_registry::OID_SIG_ED25519
+        );
+        assert_eq!(
+            parsed.signature_algorithm.algorithm,
+            oid_registry::OID_SIG_ED25519
+        );
+        assert_eq!(
+            parsed.tbs_certificate.subject_pki.parsed().unwrap(),
+            x509_parser::public_key::PublicKey::Unknown(
+                public_key_25519.to_big_endian().as_slice()
+            )
+        );
+        assert_eq!(
+            parsed.public_key().parsed().unwrap(),
+            x509_parser::public_key::PublicKey::Unknown(
+                public_key_25519.to_big_endian().as_slice()
+            )
+        );
+        assert_eq!(
+            parsed
+                .get_extension_unique(&utils::OID_DOTAKON_PALLAS_PUBLIC_KEY)
+                .unwrap()
+                .unwrap()
+                .value,
+            public_key_pallas.to_big_endian().as_slice()
+        );
+        let identity_signature_extension = parsed
+            .get_extension_unique(&utils::OID_DOTAKON_IDENTITY_SIGNATURE_DUAL_SCHNORR)
+            .unwrap()
+            .unwrap();
+        let mut signature_bytes = [0u8; 128];
+        signature_bytes.copy_from_slice(identity_signature_extension.value);
+        keys::KeyManager::verify_public_key_identity(
+            &utils::decompress_point_pallas(key_manager.public_key()).unwrap(),
+            &utils::decompress_point_c25519(key_manager.public_key_25519()).unwrap(),
+            &utils::DualSchnorrSignature::decode(&signature_bytes).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_certificate_validity() {
+        let (secret_key, _, _, _) = utils::testing_keys1();
+        let key_manager = Arc::new(keys::KeyManager::new(secret_key).unwrap());
+        let nonce = U256::from_little_endian(&[
+            1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+            24, 25, 26, 27, 28, 29, 30, 0, 0,
+        ]);
+        let certificate =
+            generate_certificate(key_manager.clone(), "110.120.130.140".to_string(), nonce)
+                .unwrap();
+        let (_, parsed) = x509_parser::parse_x509_certificate(certificate.der()).unwrap();
+
+        let now = OffsetDateTime::now_utc();
+        let expected_not_before = now - Duration::days(1);
+        let expected_not_after = now + Duration::days(365);
+
+        let actual_not_before =
+            OffsetDateTime::from_unix_timestamp(get_cert_not_before(&parsed) as i64).unwrap();
+        let actual_not_after =
+            OffsetDateTime::from_unix_timestamp(get_cert_not_after(&parsed) as i64).unwrap();
+
+        assert!(actual_not_before >= expected_not_before - Duration::hours(1));
+        assert!(actual_not_before <= expected_not_before + Duration::hours(1));
+        assert!(actual_not_after >= expected_not_after - Duration::hours(1));
+        assert!(actual_not_after <= expected_not_after + Duration::hours(1));
+    }
+
     #[test]
     fn test_client_cert_verifier_parameters() {
         let verifier = DotakonClientCertVerifier::new();
@@ -379,5 +487,140 @@ mod tests {
         assert!(verifier.root_hint_subjects().is_none());
     }
 
-    // TODO
+    #[test]
+    fn test_client_certificate_verification() {
+        let (secret_key, _, _, _) = utils::testing_keys1();
+        let key_manager = Arc::new(keys::KeyManager::new(secret_key).unwrap());
+        let nonce = U256::from_little_endian(&[
+            1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+            24, 25, 26, 27, 28, 29, 30, 0, 0,
+        ]);
+        let certificate =
+            generate_certificate(key_manager, "127.0.0.1".to_string(), nonce).unwrap();
+        let verifier = DotakonClientCertVerifier::new();
+        assert!(
+            verifier
+                .verify_client_cert(certificate.der(), &[], rustls::pki_types::UnixTime::now())
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_not_yet_valid_client_certificate_verification() {
+        let (secret_key, _, _, _) = utils::testing_keys1();
+        let key_manager = Arc::new(keys::KeyManager::new(secret_key).unwrap());
+        let nonce = U256::from_little_endian(&[
+            1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+            24, 25, 26, 27, 28, 29, 30, 0, 0,
+        ]);
+        let certificate =
+            generate_certificate(key_manager, "127.0.0.1".to_string(), nonce).unwrap();
+        let verifier = DotakonClientCertVerifier::new();
+        assert!(
+            !verifier
+                .verify_client_cert(
+                    certificate.der(),
+                    &[],
+                    rustls::pki_types::UnixTime::since_unix_epoch(std::time::Duration::from_secs(
+                        (OffsetDateTime::now_utc() - Duration::days(2) - OffsetDateTime::UNIX_EPOCH)
+                            .whole_seconds() as u64
+                    )),
+                )
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_expired_client_certificate_verification() {
+        let (secret_key, _, _, _) = utils::testing_keys1();
+        let key_manager = Arc::new(keys::KeyManager::new(secret_key).unwrap());
+        let nonce = U256::from_little_endian(&[
+            1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+            24, 25, 26, 27, 28, 29, 30, 0, 0,
+        ]);
+        let certificate =
+            generate_certificate(key_manager, "127.0.0.1".to_string(), nonce).unwrap();
+        let verifier = DotakonClientCertVerifier::new();
+        assert!(
+            !verifier
+                .verify_client_cert(
+                    certificate.der(),
+                    &[],
+                    rustls::pki_types::UnixTime::since_unix_epoch(std::time::Duration::from_secs(
+                        (OffsetDateTime::now_utc() + Duration::days(366)
+                            - OffsetDateTime::UNIX_EPOCH)
+                            .whole_seconds() as u64
+                    )),
+                )
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mutual_tls() {
+        let nonce = U256::from_little_endian(&[
+            1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+            24, 25, 26, 27, 28, 29, 30, 0, 0,
+        ]);
+
+        let (server_secret_key, _, _, _) = utils::testing_keys1();
+        let server_key_manager = Arc::new(keys::KeyManager::new(server_secret_key).unwrap());
+        let server_certificate =
+            generate_certificate(server_key_manager.clone(), "server".to_string(), nonce).unwrap();
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(
+            rustls::ServerConfig::builder()
+                .with_client_cert_verifier(Arc::new(DotakonClientCertVerifier::new()))
+                .with_single_cert(
+                    vec![server_certificate.der().clone()],
+                    rustls::pki_types::PrivateKeyDer::Pkcs8(
+                        rustls::pki_types::PrivatePkcs8KeyDer::from(
+                            server_key_manager.export_private_key().unwrap(),
+                        ),
+                    ),
+                )
+                .unwrap(),
+        ));
+
+        let (client_secret_key, _, _, _) = utils::testing_keys2();
+        let client_key_manager = Arc::new(keys::KeyManager::new(client_secret_key).unwrap());
+        let client_certificate =
+            generate_certificate(client_key_manager.clone(), "client".to_string(), nonce).unwrap();
+        let connector = tokio_rustls::TlsConnector::from(Arc::new(
+            rustls::ClientConfig::builder()
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(DotakonServerCertVerifier::new()))
+                .with_client_auth_cert(
+                    vec![client_certificate.der().clone()],
+                    rustls::pki_types::PrivateKeyDer::Pkcs8(
+                        rustls::pki_types::PrivatePkcs8KeyDer::from(
+                            client_key_manager.export_private_key().unwrap(),
+                        ),
+                    ),
+                )
+                .unwrap(),
+        ));
+
+        let (client_stream, server_stream) = tokio::io::duplex(4096);
+
+        let server_task = tokio::task::spawn(async move {
+            let mut stream = acceptor.accept(server_stream).await.unwrap();
+            let mut buffer = [0u8; 4];
+            stream.read_exact(&mut buffer).await.unwrap();
+            assert_eq!(&buffer, b"ping");
+            stream.write_all(b"pong").await.unwrap();
+        });
+        let client_task = tokio::spawn(async move {
+            let mut stream = connector
+                .connect("localhost".try_into().unwrap(), client_stream)
+                .await
+                .unwrap();
+            stream.write_all(b"ping").await.unwrap();
+            let mut buffer = [0u8; 4];
+            stream.read_exact(&mut buffer).await.unwrap();
+            assert_eq!(&buffer, b"pong");
+        });
+
+        let (result1, result2) = tokio::join!(server_task, client_task);
+        assert!(result1.is_ok() && result2.is_ok());
+    }
 }

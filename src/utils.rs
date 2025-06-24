@@ -90,49 +90,120 @@ pub fn decompress_point_c25519(value: U256) -> Result<Point25519> {
         .context("invalid Curve25519 point")
 }
 
-/// TODO: make this production code.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct DualSchnorrSignature {
+    pub nonce_pallas: PointPallas,
+    pub nonce_25519: Point25519,
+    pub signature_pallas: ScalarPallas,
+    pub signature_25519: Scalar25519,
+}
+
+impl DualSchnorrSignature {
+    pub fn decode(bytes: &[u8; 128]) -> Result<DualSchnorrSignature> {
+        let nonce_pallas =
+            decompress_point_pallas(U256::from_big_endian(&bytes[0..32])).map_err(|_| {
+                rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding)
+            })?;
+        let nonce_25519 =
+            decompress_point_c25519(U256::from_big_endian(&bytes[32..64])).map_err(|_| {
+                rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding)
+            })?;
+        let signature_pallas = u256_to_pallas_scalar(U256::from_little_endian(&bytes[64..96]))
+            .map_err(|_| {
+                rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding)
+            })?;
+        let signature_25519 = u256_to_c25519_scalar(U256::from_little_endian(&bytes[96..128]))
+            .map_err(|_| {
+                rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding)
+            })?;
+        Ok(DualSchnorrSignature {
+            nonce_pallas,
+            nonce_25519,
+            signature_pallas,
+            signature_25519,
+        })
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut bytes = [0u8; 128];
+        bytes[0..32].copy_from_slice(
+            compress_point_pallas(&self.nonce_pallas)
+                .to_big_endian()
+                .as_slice(),
+        );
+        bytes[32..64].copy_from_slice(
+            compress_point_c25519(&self.nonce_25519)
+                .to_big_endian()
+                .as_slice(),
+        );
+        bytes[64..96].copy_from_slice(
+            pallas_scalar_to_u256(self.signature_pallas)
+                .to_little_endian()
+                .as_slice(),
+        );
+        bytes[96..128].copy_from_slice(
+            c25519_scalar_to_u256(self.signature_25519)
+                .to_little_endian()
+                .as_slice(),
+        );
+        bytes.to_vec()
+    }
+}
+
+pub fn format_wallet_address(wallet_address: U256) -> String {
+    format!("{:#x}", wallet_address)
+}
+
+// TODO: make this production code?
 #[cfg(test)]
-fn make_test_keys(secret_key: &str) -> (U256, U256, U256) {
+fn make_test_keys(secret_key: &str) -> (U256, U256, U256, U256) {
     use ed25519_dalek;
     use pasta_curves::group::Group;
+    use sha3::{self, Digest};
     let secret_key = U256::from_str_radix(secret_key, 16).unwrap();
     let signing_key = ed25519_dalek::SigningKey::from_bytes(&secret_key.to_little_endian());
     let private_key_25519 = signing_key.to_scalar();
     let public_key_pallas =
         PointPallas::generator() * c25519_scalar_to_pallas_scalar(private_key_25519);
     let public_key_25519 = Point25519::mul_base(&private_key_25519);
+    let compressed_pallas_key = compress_point_pallas(&public_key_pallas);
+    let mut hasher = sha3::Sha3_256::new();
+    hasher.update(compressed_pallas_key.to_little_endian());
+    let wallet_address = U256::from_big_endian(hasher.finalize().as_slice());
     (
         secret_key,
-        compress_point_pallas(&public_key_pallas),
+        compressed_pallas_key,
         compress_point_c25519(&public_key_25519),
+        wallet_address,
     )
 }
 
 /// WARNING: FOR TESTS ONLY, DO NOT use this key for anything else. They're leaked. If you create a
 /// wallet with this, all your funds will be permanently LOST.
 ///
-/// The three returned components are: the secret key, the public Pallas key, and the public
-/// Curve25519 key.
+/// The four returned components are: the secret key, the public Pallas key, the public Curve25519
+/// key, and the wallet address.
 #[cfg(test)]
-pub fn testing_keys1() -> (U256, U256, U256) {
+pub fn testing_keys1() -> (U256, U256, U256, U256) {
     make_test_keys("0xb0276914bf0f850d27771adb1abb62b2674e041b63c86c8cd0d7520355ae7c0".into())
 }
 
 /// WARNING: FOR TESTS ONLY, DO NOT use this key for anything else. They're leaked. If you create a
 /// wallet with this, all your funds will be permanently LOST.
 ///
-/// The three returned components are: the secret key, the public Pallas key, and the public
-/// Curve25519 key.
+/// The four returned components are: the secret key, the public Pallas key, the public Curve25519
+/// key, and the wallet address.
 #[cfg(test)]
-pub fn testing_keys2() -> (U256, U256, U256) {
+pub fn testing_keys2() -> (U256, U256, U256, U256) {
     make_test_keys("0xfc56ce55997c46f1ba0bce9a8a4daead405c29edf4066a2cd7d0419f592392b".into())
 }
 
 #[cfg(test)]
 mod tests {
-    use pasta_curves::group::Group;
-
     use super::*;
+
+    use ed25519_dalek;
+    use pasta_curves::group::Group;
 
     #[test]
     fn test_custom_oids() {
@@ -292,5 +363,57 @@ mod tests {
         let point = Point25519::mul_base(&scalar);
         let compressed = compress_point_c25519(&point);
         assert_eq!(point, decompress_point_c25519(compressed).unwrap());
+    }
+
+    #[test]
+    fn test_format_wallet_address1() {
+        let (_, _, _, wallet_address) = testing_keys1();
+        assert_eq!(
+            format_wallet_address(wallet_address),
+            "0x876431d0e6aaa0c15d752f1b73540761e8226aef004fa633f0571435a0786a7d"
+        );
+    }
+
+    #[test]
+    fn test_format_wallet_address2() {
+        let (_, _, _, wallet_address) = testing_keys2();
+        assert_eq!(
+            format_wallet_address(wallet_address),
+            "0x20502edb6f0580d8b792a712b8235bc69a5912d6b20c2894e936c9bcf8fd4af7"
+        );
+    }
+
+    #[test]
+    fn test_dual_schnorr_signature_encoding() {
+        let (secret_key, _, _, _) = testing_keys1();
+        let ed25519_signing_key =
+            ed25519_dalek::SigningKey::from_bytes(&secret_key.to_little_endian());
+        let private_key_25519 = ed25519_signing_key.to_scalar();
+        let private_key_pallas = c25519_scalar_to_pallas_scalar(private_key_25519);
+        let nonce_25519 = Scalar25519::from_canonical_bytes([
+            1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+            24, 25, 26, 27, 28, 29, 30, 0, 0,
+        ])
+        .unwrap();
+        let nonce_pallas = c25519_scalar_to_pallas_scalar(nonce_25519);
+        let nonce_point_25519 = Point25519::mul_base(&nonce_25519);
+        let nonce_point_pallas = PointPallas::generator() * nonce_pallas;
+        let challenge_25519 = Scalar25519::from_canonical_bytes([
+            30u8, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10,
+            9, 8, 7, 6, 5, 4, 3, 2, 1, 0, 0,
+        ])
+        .unwrap();
+        let challenge_pallas = c25519_scalar_to_pallas_scalar(challenge_25519);
+        let signature_25519 = nonce_25519 + challenge_25519 * private_key_25519;
+        let signature_pallas = nonce_pallas + challenge_pallas * private_key_pallas;
+        let signature = DualSchnorrSignature {
+            nonce_pallas: nonce_point_pallas,
+            nonce_25519: nonce_point_25519,
+            signature_pallas,
+            signature_25519,
+        };
+        let mut bytes = [0u8; 128];
+        bytes.copy_from_slice(signature.encode().as_slice());
+        assert_eq!(signature, DualSchnorrSignature::decode(&bytes).unwrap());
     }
 }
