@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::{self, Context};
-use curve25519_dalek::{EdwardsPoint as Point25519, Scalar as Scalar25519, scalar::clamp_integer};
+use curve25519_dalek::{Scalar as Scalar25519, scalar::clamp_integer};
 use ed25519_dalek::{self, Verifier};
 use pasta_curves::{group::GroupEncoding, pallas::Point as PointPallas};
 use primitive_types::U256;
@@ -74,69 +74,50 @@ fn get_cert_not_after(certificate: &X509Certificate) -> u64 {
     certificate.tbs_certificate.validity.not_after.timestamp() as u64
 }
 
+pub fn recover_c25519_public_key(certificate: &X509Certificate) -> Result<U256, rustls::Error> {
+    let public_key = certificate
+        .tbs_certificate
+        .subject_pki
+        .parsed()
+        .map_err(|_| rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding))?;
+    let bytes = match public_key {
+        // NOTE: the x509_parser doesn't handle Ed25519 keys yet, so our Ed25519 keys show up as
+        // "unknown".
+        x509_parser::public_key::PublicKey::Unknown(bytes) => Ok(bytes),
+        _ => Err(rustls::Error::InvalidCertificate(
+            rustls::CertificateError::UnsupportedSignatureAlgorithm,
+        )),
+    }?;
+    if bytes.len() != 32 {
+        return Err(rustls::Error::InvalidCertificate(
+            rustls::CertificateError::BadEncoding,
+        ));
+    }
+    Ok(U256::from_big_endian(&bytes))
+}
+
+pub fn recover_pallas_public_key(certificate: &X509Certificate) -> Result<U256, rustls::Error> {
+    let extensions = certificate.extensions_map().map_err(|_| {
+        rustls::Error::General("public Pallas key not found in X.509 certificate".into())
+    })?;
+    let extension = extensions
+        .get(&utils::OID_DOTAKON_PALLAS_PUBLIC_KEY)
+        .context("public Pallas key not found in X.509 certificate")
+        .map_err(|error| rustls::Error::General(error.to_string()))?;
+    if extension.value.len() != 32 {
+        return Err(rustls::Error::InvalidCertificate(
+            rustls::CertificateError::BadEncoding,
+        ));
+    }
+    let mut bytes = [0u8; 32];
+    bytes.copy_from_slice(extension.value);
+    Ok(U256::from_big_endian(&bytes))
+}
+
 #[derive(Debug, Clone)]
 struct CertificateVerifier {}
 
 impl CertificateVerifier {
-    fn recover_c25519_public_key_bytes(
-        certificate: &X509Certificate,
-    ) -> Result<Vec<u8>, rustls::Error> {
-        let public_key = certificate
-            .tbs_certificate
-            .subject_pki
-            .parsed()
-            .map_err(|_| {
-                rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding)
-            })?;
-        let bytes = match public_key {
-            // NOTE: the x509_parser doesn't handle Ed25519 keys yet, so our Ed25519 keys show up as
-            // "unknown".
-            x509_parser::public_key::PublicKey::Unknown(bytes) => Ok(bytes),
-            _ => Err(rustls::Error::InvalidCertificate(
-                rustls::CertificateError::UnsupportedSignatureAlgorithm,
-            )),
-        }?;
-        if bytes.len() != 32 {
-            return Err(rustls::Error::InvalidCertificate(
-                rustls::CertificateError::BadEncoding,
-            ));
-        }
-        Ok(bytes.to_vec())
-    }
-
-    fn recover_c25519_public_key(
-        certificate: &X509Certificate,
-    ) -> Result<Point25519, rustls::Error> {
-        let bytes = Self::recover_c25519_public_key_bytes(certificate)?;
-        utils::decompress_point_c25519(U256::from_big_endian(bytes.as_slice()))
-            .map_err(|_| rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding))
-    }
-
-    fn recover_pallas_public_key(
-        certificate: &X509Certificate,
-    ) -> Result<PointPallas, rustls::Error> {
-        let extensions = certificate.extensions_map().map_err(|_| {
-            rustls::Error::General("public Pallas key not found in X.509 certificate".into())
-        })?;
-        let extension = extensions
-            .get(&utils::OID_DOTAKON_PALLAS_PUBLIC_KEY)
-            .context("public Pallas key not found in X.509 certificate")
-            .map_err(|error| rustls::Error::General(error.to_string()))?;
-        if extension.value.len() != 32 {
-            return Err(rustls::Error::InvalidCertificate(
-                rustls::CertificateError::BadEncoding,
-            ));
-        }
-        let mut bytes = [0u8; 32];
-        bytes.copy_from_slice(extension.value);
-        match PointPallas::from_bytes(&bytes).into_option() {
-            Some(point) => Ok(point),
-            None => Err(rustls::Error::InvalidCertificate(
-                rustls::CertificateError::BadEncoding,
-            )),
-        }
-    }
-
     fn recover_identity_signature(
         certificate: &X509Certificate,
     ) -> Result<utils::DualSchnorrSignature, rustls::Error> {
@@ -180,13 +161,26 @@ impl CertificateVerifier {
             ));
         }
 
-        let public_key_25519 = Self::recover_c25519_public_key(&certificate)?;
-        let public_key_pallas = Self::recover_pallas_public_key(&certificate)?;
+        let public_key_25519 = recover_c25519_public_key(&certificate)?;
+        let public_key_point_25519 =
+            utils::decompress_point_c25519(public_key_25519).map_err(|_| {
+                rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding)
+            })?;
+
+        let public_key_pallas = recover_pallas_public_key(&certificate)?;
+        let public_key_point_pallas =
+            match PointPallas::from_bytes(&public_key_pallas.to_big_endian()).into_option() {
+                Some(point) => Ok(point),
+                None => Err(rustls::Error::InvalidCertificate(
+                    rustls::CertificateError::BadEncoding,
+                )),
+            }?;
+
         let signature = Self::recover_identity_signature(&certificate)?;
 
         keys::KeyManager::verify_public_key_identity(
-            &public_key_pallas,
-            &public_key_25519,
+            &public_key_point_pallas,
+            &public_key_point_25519,
             &signature,
         )
         .map_err(|_| rustls::Error::InvalidCertificate(rustls::CertificateError::BadSignature))?;
@@ -211,12 +205,9 @@ impl CertificateVerifier {
                 rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding)
             })?;
 
-        let mut public_key_bytes = [0u8; ed25519_dalek::PUBLIC_KEY_LENGTH];
-        public_key_bytes.copy_from_slice(
-            Self::recover_c25519_public_key_bytes(&parsed_certificate)?.as_slice(),
-        );
-        let verifying_key =
-            ed25519_dalek::VerifyingKey::from_bytes(&public_key_bytes).map_err(|_| {
+        let public_key = recover_c25519_public_key(&parsed_certificate)?;
+        let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&public_key.to_big_endian())
+            .map_err(|_| {
                 rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding)
             })?;
 
@@ -367,10 +358,12 @@ impl ServerCertVerifier for DotakonServerCertVerifier {
 mod tests {
     use super::*;
 
+    use anyhow::anyhow;
     use oid_registry;
+    use rustls::CommonState;
     use tokio::{
         self,
-        io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt},
+        io::{AsyncReadExt, AsyncWriteExt},
     };
 
     #[test]
@@ -433,6 +426,39 @@ mod tests {
             &utils::DualSchnorrSignature::decode(&signature_bytes).unwrap(),
         )
         .unwrap();
+    }
+
+    fn test_recover_public_keys(secret_key: U256) {
+        let key_manager = Arc::new(keys::KeyManager::new(secret_key).unwrap());
+        let nonce = U256::from_little_endian(&[
+            1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+            24, 25, 26, 27, 28, 29, 30, 0, 0,
+        ]);
+        let certificate =
+            generate_certificate(key_manager.clone(), "110.120.130.140".to_string(), nonce)
+                .unwrap();
+        let (_, parsed_certificate) =
+            x509_parser::parse_x509_certificate(certificate.der()).unwrap();
+        assert_eq!(
+            recover_c25519_public_key(&parsed_certificate).unwrap(),
+            key_manager.public_key_25519()
+        );
+        assert_eq!(
+            recover_pallas_public_key(&parsed_certificate).unwrap(),
+            key_manager.public_key()
+        );
+    }
+
+    #[test]
+    fn test_recover_public_keys1() {
+        let (secret_key, _, _, _) = utils::testing_keys1();
+        test_recover_public_keys(secret_key);
+    }
+
+    #[test]
+    fn test_recover_public_keys2() {
+        let (secret_key, _, _, _) = utils::testing_keys2();
+        test_recover_public_keys(secret_key);
     }
 
     #[test]
@@ -556,6 +582,28 @@ mod tests {
         );
     }
 
+    fn check_peer(
+        connection: &CommonState,
+        peer_keys: Arc<keys::KeyManager>,
+    ) -> anyhow::Result<()> {
+        let certificates = connection
+            .peer_certificates()
+            .context("certificate not found")?;
+        if certificates.len() != 1 {
+            return Err(anyhow!("unexpected number of certificates in the chain"));
+        }
+        let (_, parsed_certificate) = x509_parser::parse_x509_certificate(&certificates[0])?;
+        let public_key_25519 = recover_c25519_public_key(&parsed_certificate)?;
+        if public_key_25519 != peer_keys.public_key_25519() {
+            return Err(anyhow!("the c25519 public key doesn't match"));
+        }
+        let public_key_pallas = recover_pallas_public_key(&parsed_certificate)?;
+        if public_key_pallas != peer_keys.public_key() {
+            return Err(anyhow!("the Pallas public key doesn't match"));
+        }
+        Ok(())
+    }
+
     #[tokio::test]
     async fn test_mutual_tls() {
         let nonce = U256::from_little_endian(&[
@@ -604,6 +652,8 @@ mod tests {
 
         let server_task = tokio::task::spawn(async move {
             let mut stream = acceptor.accept(server_stream).await.unwrap();
+            let (_, connection) = stream.get_ref();
+            assert!(check_peer(connection, client_key_manager).is_ok());
             let mut buffer = [0u8; 4];
             stream.read_exact(&mut buffer).await.unwrap();
             assert_eq!(&buffer, b"ping");
@@ -614,6 +664,8 @@ mod tests {
                 .connect("localhost".try_into().unwrap(), client_stream)
                 .await
                 .unwrap();
+            let (_, connection) = stream.get_ref();
+            assert!(check_peer(connection, server_key_manager).is_ok());
             stream.write_all(b"ping").await.unwrap();
             let mut buffer = [0u8; 4];
             stream.read_exact(&mut buffer).await.unwrap();
