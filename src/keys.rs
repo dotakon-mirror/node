@@ -1,6 +1,3 @@
-use std::ops::Deref;
-use std::sync::Mutex;
-
 use anyhow::{Result, anyhow};
 use curve25519_dalek::{
     EdwardsPoint as Point25519,
@@ -11,35 +8,28 @@ use pasta_curves::{group::Group, pallas::Point as PointPallas};
 use primitive_types::U256;
 use rcgen;
 use sha3::{self, Digest};
+use std::ops::Deref;
+use std::sync::Mutex;
 
 use crate::utils;
 
 #[derive(Debug, Clone)]
-pub struct RemoteEd25519KeyPair<R>
-where
-    R: Deref<Target = KeyManager>,
-{
+pub struct RemoteEd25519KeyPair<R: Deref<Target = KeyManager>> {
     parent: R,
     public_key_cache: [u8; ed25519_dalek::PUBLIC_KEY_LENGTH],
 }
 
-impl<R> From<R> for RemoteEd25519KeyPair<R>
-where
-    R: Deref<Target = KeyManager>,
-{
+impl<R: Deref<Target = KeyManager>> From<R> for RemoteEd25519KeyPair<R> {
     fn from(key_manager: R) -> Self {
         let public_key_cache = key_manager.public_key_25519.to_big_endian();
-        RemoteEd25519KeyPair {
+        Self {
             parent: key_manager,
             public_key_cache,
         }
     }
 }
 
-impl<R> rcgen::RemoteKeyPair for RemoteEd25519KeyPair<R>
-where
-    R: Deref<Target = KeyManager>,
-{
+impl<R: Deref<Target = KeyManager>> rcgen::RemoteKeyPair for RemoteEd25519KeyPair<R> {
     fn public_key(&self) -> &[u8] {
         &self.public_key_cache
     }
@@ -80,18 +70,14 @@ impl KeyManager {
         let public_key_point_25519 = Point25519::mul_base(&private_key_25519);
         let public_key_25519 = utils::compress_point_c25519(&public_key_point_25519);
 
-        let mut hasher = sha3::Sha3_256::new();
-        hasher.update(public_key_pallas.to_little_endian());
-        let wallet_address = U256::from_big_endian(hasher.finalize().as_slice());
-
-        Ok(KeyManager {
+        Ok(Self {
             ed25519_signing_key: Mutex::new(ed25519_signing_key),
             private_key: private_key_25519,
             public_key_point_pallas,
             public_key_pallas,
             public_key_point_25519,
             public_key_25519,
-            wallet_address,
+            wallet_address: utils::public_key_to_wallet_address(public_key_pallas),
         })
     }
 
@@ -196,10 +182,13 @@ impl KeyManager {
             &signature.nonce_25519,
         );
         let challenge_pallas = utils::c25519_scalar_to_pallas_scalar(challenge_25519);
-        if (Point25519::mul_base(&signature.signature_25519)
-            != signature.nonce_25519 + public_key_25519 * challenge_25519)
-            || (PointPallas::generator() * signature.signature_pallas
-                != signature.nonce_pallas + public_key_pallas * challenge_pallas)
+        if Point25519::mul_base(&signature.signature_25519)
+            != signature.nonce_25519 + public_key_25519 * challenge_25519
+        {
+            return Err(anyhow!("invalid signature"));
+        }
+        if PointPallas::generator() * signature.signature_pallas
+            != signature.nonce_pallas + public_key_pallas * challenge_pallas
         {
             return Err(anyhow!("invalid signature"));
         }

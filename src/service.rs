@@ -1,14 +1,12 @@
-use std::sync::Arc;
-
-use anyhow::Result;
-use dotakon::node_service_v1_server::NodeServiceV1;
+use crate::dotakon::{self, node_service_v1_server::NodeServiceV1};
+use crate::utils;
+use crate::{keys, net};
+use anyhow::{Context, Result};
+use primitive_types::U256;
 use std::pin::Pin;
+use std::sync::Arc;
 use tokio_stream::Stream;
 use tonic::{Request, Response, Status, Streaming};
-
-use crate::dotakon;
-use crate::keys;
-use crate::utils;
 
 #[derive(Debug)]
 pub struct NodeService {
@@ -26,7 +24,23 @@ impl NodeService {
             "Wallet address: {}",
             utils::format_wallet_address(key_manager.wallet_address())
         );
-        NodeService { key_manager }
+        Self { key_manager }
+    }
+
+    fn get_peer_public_key<M>(&self, request: &Request<M>) -> Result<U256> {
+        let info = request
+            .extensions()
+            .get::<net::ConnectionInfo>()
+            .context("certificate not found")?;
+        Ok(info.peer_public_key())
+    }
+
+    fn get_peer_wallet_address<M>(&self, request: &Request<M>) -> Result<U256> {
+        let info = request
+            .extensions()
+            .get::<net::ConnectionInfo>()
+            .context("certificate not found")?;
+        Ok(info.peer_wallet_address())
     }
 }
 

@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use anyhow::{self, Context};
 use curve25519_dalek::{Scalar as Scalar25519, scalar::clamp_integer};
 use ed25519_dalek::{self, Verifier};
@@ -9,6 +7,7 @@ use rcgen;
 use rustls::{
     SignatureScheme, client::danger::ServerCertVerifier, server::danger::ClientCertVerifier,
 };
+use std::sync::Arc;
 use time::{Duration, OffsetDateTime};
 use x509_parser::{self, certificate::X509Certificate};
 
@@ -236,7 +235,7 @@ pub struct DotakonClientCertVerifier {
 
 impl DotakonClientCertVerifier {
     pub fn new() -> Self {
-        DotakonClientCertVerifier {
+        Self {
             root_hint_subjects: [],
             verifier: CertificateVerifier {},
         }
@@ -302,7 +301,7 @@ pub struct DotakonServerCertVerifier {
 
 impl DotakonServerCertVerifier {
     pub fn new() -> Self {
-        DotakonServerCertVerifier {
+        Self {
             verifier: CertificateVerifier {},
         }
     }
@@ -590,7 +589,10 @@ mod tests {
             .peer_certificates()
             .context("certificate not found")?;
         if certificates.len() != 1 {
-            return Err(anyhow!("unexpected number of certificates in the chain"));
+            return Err(anyhow!(
+                "unexpected number of mTLS certificates (expected: 1, got {})",
+                certificates.len()
+            ));
         }
         let (_, parsed_certificate) = x509_parser::parse_x509_certificate(&certificates[0])?;
         let public_key_25519 = recover_c25519_public_key(&parsed_certificate)?;

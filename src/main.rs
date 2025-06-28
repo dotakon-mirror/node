@@ -1,16 +1,19 @@
-use std::sync::Arc;
-
 use anyhow::Result;
 use clap::Parser;
 use dotakon::node_service_v1_server::NodeServiceV1Server;
 use primitive_types::U256;
 use rand_core::{OsRng, RngCore};
+use std::sync::Arc;
 use tonic::transport::Server;
 
 mod keys;
+mod net;
 mod service;
 mod ssl;
 mod utils;
+
+#[cfg(test)]
+mod fake;
 
 pub mod dotakon {
     tonic::include_proto!("dotakon");
@@ -54,10 +57,10 @@ struct Args {
     bootstrap_list: Vec<String>,
 }
 
-fn get_random() -> Result<U256> {
+fn get_random() -> U256 {
     let mut bytes = [0u8; 32];
-    OsRng.try_fill_bytes(&mut bytes)?;
-    Ok(U256::from_little_endian(&bytes))
+    OsRng.fill_bytes(&mut bytes);
+    U256::from_little_endian(&bytes)
 }
 
 #[tokio::main]
@@ -65,7 +68,7 @@ async fn main() -> Result<()> {
     let args = Args::parse();
 
     let secret_key = if args.secret_key.is_empty() {
-        let key = get_random()?;
+        let key = get_random();
         println!("New secret key: {:#x}", key);
         key
     } else {
@@ -73,20 +76,24 @@ async fn main() -> Result<()> {
     };
 
     let key_manager = Arc::new(keys::KeyManager::new(secret_key)?);
-    ssl::generate_certificate(
+    let certificate = Arc::new(ssl::generate_certificate(
         key_manager.clone(),
         args.public_address,
-        /*nonce=*/ get_random()?,
-    )?;
+        /*nonce=*/ get_random(),
+    )?);
 
     let server = Server::builder().add_service(NodeServiceV1Server::new(
-        service::NodeService::new(key_manager),
+        service::NodeService::new(key_manager.clone()),
     ));
 
     let local_address = format!("{}:{}", args.local_address, args.port);
     println!("listening on {}", local_address);
 
-    server.serve(local_address.parse()?).await?;
+    server
+        .serve_with_incoming(
+            net::IncomingWithMTls::new(local_address, key_manager, certificate).await?,
+        )
+        .await?;
 
     Ok(())
 }

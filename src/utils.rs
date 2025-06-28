@@ -8,6 +8,7 @@ use pasta_curves::{
     group::GroupEncoding, pallas::Point as PointPallas, pallas::Scalar as ScalarPallas,
 };
 use primitive_types::U256;
+use sha3::{self, Digest};
 
 pub const OID_DOTAKON_PALLAS_PUBLIC_KEY: Oid<'_> = oid!(1.3.6.1.4.1.71104.1);
 pub const OID_DOTAKON_IDENTITY_SIGNATURE_DUAL_SCHNORR: Oid<'_> = oid!(1.3.6.1.4.1.71104.2);
@@ -116,7 +117,7 @@ impl DualSchnorrSignature {
             .map_err(|_| {
                 rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding)
             })?;
-        Ok(DualSchnorrSignature {
+        Ok(Self {
             nonce_pallas,
             nonce_25519,
             signature_pallas,
@@ -150,6 +151,14 @@ impl DualSchnorrSignature {
     }
 }
 
+/// Converts the (Pallas) public key of an account to the corresponding wallet address. Basically
+/// just a SHA3 hash.
+pub fn public_key_to_wallet_address(public_key: U256) -> U256 {
+    let mut hasher = sha3::Sha3_256::new();
+    hasher.update(public_key.to_little_endian());
+    U256::from_big_endian(hasher.finalize().as_slice())
+}
+
 pub fn format_wallet_address(wallet_address: U256) -> String {
     format!("{:#x}", wallet_address)
 }
@@ -159,7 +168,6 @@ pub fn format_wallet_address(wallet_address: U256) -> String {
 fn make_test_keys(secret_key: &str) -> (U256, U256, U256, U256) {
     use ed25519_dalek;
     use pasta_curves::group::Group;
-    use sha3::{self, Digest};
     let secret_key = U256::from_str_radix(secret_key, 16).unwrap();
     let signing_key = ed25519_dalek::SigningKey::from_bytes(&secret_key.to_little_endian());
     let private_key_25519 = signing_key.to_scalar();
@@ -167,9 +175,7 @@ fn make_test_keys(secret_key: &str) -> (U256, U256, U256, U256) {
         PointPallas::generator() * c25519_scalar_to_pallas_scalar(private_key_25519);
     let public_key_25519 = Point25519::mul_base(&private_key_25519);
     let compressed_pallas_key = compress_point_pallas(&public_key_pallas);
-    let mut hasher = sha3::Sha3_256::new();
-    hasher.update(compressed_pallas_key.to_little_endian());
-    let wallet_address = U256::from_big_endian(hasher.finalize().as_slice());
+    let wallet_address = public_key_to_wallet_address(compressed_pallas_key);
     (
         secret_key,
         compressed_pallas_key,
