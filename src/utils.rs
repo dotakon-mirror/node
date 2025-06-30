@@ -57,6 +57,13 @@ pub fn u256_to_pallas_scalar(value: U256) -> Result<ScalarPallas> {
     ScalarPallas::from_repr_vartime(value.to_little_endian()).context("invalid Pallas scalar")
 }
 
+pub fn u256_to_clamped_pallas_scalar(value: U256) -> ScalarPallas {
+    let mut bytes = [0u8; 32];
+    bytes.copy_from_slice(value.to_little_endian().as_slice());
+    bytes[31] &= 0x0F;
+    ScalarPallas::from_repr_vartime(bytes).unwrap()
+}
+
 pub fn u256_to_c25519_scalar(value: U256) -> Result<Scalar25519> {
     Scalar25519::from_canonical_bytes(value.to_little_endian())
         .into_option()
@@ -89,6 +96,35 @@ pub fn decompress_point_c25519(value: U256) -> Result<Point25519> {
     CompressedEdwardsY::from_slice(&value.to_big_endian())?
         .decompress()
         .context("invalid Curve25519 point")
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct SchnorrPallasSignature {
+    pub nonce: PointPallas,
+    pub signature: ScalarPallas,
+}
+
+impl SchnorrPallasSignature {
+    pub fn decode(bytes: &[u8; 64]) -> Result<SchnorrPallasSignature> {
+        let nonce = decompress_point_pallas(U256::from_big_endian(&bytes[0..32]))?;
+        let signature = u256_to_pallas_scalar(U256::from_little_endian(&bytes[32..64]))?;
+        Ok(Self { nonce, signature })
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut bytes = [0u8; 64];
+        bytes[0..32].copy_from_slice(
+            compress_point_pallas(&self.nonce)
+                .to_big_endian()
+                .as_slice(),
+        );
+        bytes[32..64].copy_from_slice(
+            pallas_scalar_to_u256(self.signature)
+                .to_little_endian()
+                .as_slice(),
+        );
+        bytes.to_vec()
+    }
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -294,6 +330,23 @@ mod tests {
     }
 
     #[test]
+    fn test_u256_to_clamped_pallas_scalar() {
+        let value = U256::from_little_endian(&[
+            1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+            24, 25, 26, 27, 28, 29, 30, 255, 255,
+        ]);
+        assert_eq!(
+            u256_to_clamped_pallas_scalar(value),
+            ScalarPallas::from_raw([
+                0x0807060504030201u64,
+                0x100F0E0D0C0B0A09u64,
+                0x1817161514131211u64,
+                0x0FFF1E1D1C1B1A19u64,
+            ])
+        );
+    }
+
+    #[test]
     fn test_u256_to_c25519_scalar() {
         let bytes = [
             4u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 3u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 2u8,
@@ -387,6 +440,32 @@ mod tests {
             format_wallet_address(wallet_address),
             "0x20502edb6f0580d8b792a712b8235bc69a5912d6b20c2894e936c9bcf8fd4af7"
         );
+    }
+
+    #[test]
+    fn test_schnorr_signature_encoding() {
+        let (secret_key, _, _, _) = testing_keys1();
+        let ed25519_signing_key =
+            ed25519_dalek::SigningKey::from_bytes(&secret_key.to_little_endian());
+        let private_key_25519 = ed25519_signing_key.to_scalar();
+        let private_key = c25519_scalar_to_pallas_scalar(private_key_25519);
+        let nonce = u256_to_clamped_pallas_scalar(U256::from_little_endian(&[
+            1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+            24, 25, 26, 27, 28, 29, 30, 31, 32,
+        ]));
+        let nonce_point = PointPallas::generator() * nonce;
+        let challenge = u256_to_clamped_pallas_scalar(U256::from_little_endian(&[
+            32u8, 31, 30u8, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14, 13, 12,
+            11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1,
+        ]));
+        let scalar = nonce + private_key * challenge;
+        let signature = SchnorrPallasSignature {
+            nonce: nonce_point,
+            signature: scalar,
+        };
+        let mut bytes = [0u8; 64];
+        bytes.copy_from_slice(signature.encode().as_slice());
+        assert_eq!(signature, SchnorrPallasSignature::decode(&bytes).unwrap());
     }
 
     #[test]

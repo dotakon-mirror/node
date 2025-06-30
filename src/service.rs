@@ -27,7 +27,7 @@ impl NodeService {
         Self { key_manager }
     }
 
-    fn get_peer_public_key<M>(&self, request: &Request<M>) -> Result<U256> {
+    fn get_client_public_key<M>(&self, request: &Request<M>) -> Result<U256> {
         let info = request
             .extensions()
             .get::<net::ConnectionInfo>()
@@ -35,7 +35,7 @@ impl NodeService {
         Ok(info.peer_public_key())
     }
 
-    fn get_peer_wallet_address<M>(&self, request: &Request<M>) -> Result<U256> {
+    fn get_client_wallet_address<M>(&self, request: &Request<M>) -> Result<U256> {
         let info = request
             .extensions()
             .get::<net::ConnectionInfo>()

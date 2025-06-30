@@ -1,4 +1,6 @@
+use crate::utils;
 use anyhow::{Result, anyhow};
+use base64::{Engine, prelude::BASE64_STANDARD};
 use curve25519_dalek::{
     EdwardsPoint as Point25519,
     scalar::{Scalar as Scalar25519, clamp_integer},
@@ -11,8 +13,6 @@ use rcgen;
 use sha3::{self, Digest};
 use std::ops::Deref;
 use std::sync::Mutex;
-
-use crate::utils;
 
 #[derive(Debug, Clone)]
 pub struct RemoteEd25519KeyPair<R: Deref<Target = KeyManager>> {
@@ -56,6 +56,7 @@ pub struct KeyManager {
 }
 
 impl KeyManager {
+    const SCHNORR_SIGNATURE_DOMAIN_SEPARATOR: &str = "dotakon/schnorr-signature-v1";
     const SCHNORR_IDENTITY_PROOF_DOMAIN_SEPARATOR: &str = "dotakon/schnorr-identity-v1";
 
     pub fn new(secret_key: U256) -> Result<Self> {
@@ -99,14 +100,61 @@ impl KeyManager {
         self.wallet_address
     }
 
+    fn make_signature_challenge(
+        public_key: &PointPallas,
+        nonce: &PointPallas,
+        message: &[u8],
+    ) -> ScalarPallas {
+        let message = format!(
+            "{{domain=\"{}\",public_key={:#x},nonce={:#x},message=\"{}\"}}",
+            Self::SCHNORR_SIGNATURE_DOMAIN_SEPARATOR,
+            utils::compress_point_pallas(public_key),
+            utils::compress_point_pallas(nonce),
+            BASE64_STANDARD.encode(message),
+        );
+        let mut hasher = sha3::Sha3_256::new();
+        hasher.update(message.as_bytes());
+        let hash = hasher.finalize();
+        utils::u256_to_clamped_pallas_scalar(U256::from_little_endian(hash.as_slice()))
+    }
+
+    fn make_own_signature_challenge(&self, nonce: &PointPallas, message: &[u8]) -> ScalarPallas {
+        Self::make_signature_challenge(&self.public_key_point_pallas, nonce, message)
+    }
+
+    pub fn sign(&self, message: &[u8], secret_nonce: U256) -> utils::SchnorrPallasSignature {
+        let nonce = utils::u256_to_clamped_pallas_scalar(secret_nonce);
+        let nonce_point = PointPallas::generator() * nonce;
+        let challenge = self.make_own_signature_challenge(&nonce_point, message);
+        let signature = nonce + utils::c25519_scalar_to_pallas_scalar(self.private_key) * challenge;
+        utils::SchnorrPallasSignature {
+            nonce: nonce_point,
+            signature,
+        }
+    }
+
+    pub fn verify(
+        message: &[u8],
+        public_key: &PointPallas,
+        signature: &utils::SchnorrPallasSignature,
+    ) -> Result<()> {
+        let challenge = Self::make_signature_challenge(public_key, &signature.nonce, message);
+        if PointPallas::generator() * signature.signature
+            != signature.nonce + public_key * challenge
+        {
+            return Err(anyhow!("invalid signature"));
+        }
+        Ok(())
+    }
+
     pub fn sign_ed25519(&self, message: &[u8]) -> Vec<u8> {
         let mut signing_key = self.ed25519_signing_key.lock().unwrap();
         signing_key.sign(message).to_vec()
     }
 
     pub fn verify_ed25519(
-        public_key_25519: U256,
         message: &[u8],
+        public_key_25519: U256,
         signature: &[u8; ed25519_dalek::SIGNATURE_LENGTH],
     ) -> Result<()> {
         let ed25519_signature = ed25519_dalek::Signature::from(signature);
@@ -241,6 +289,60 @@ mod tests {
         );
     }
 
+    fn test_schnorr_signature(secret_key: U256) {
+        let key_manager = KeyManager::new(secret_key).unwrap();
+        let message = "Hello, world!";
+        let signature = key_manager.sign(
+            message.as_bytes(),
+            U256::from_little_endian(&[
+                1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22,
+                23, 24, 25, 26, 27, 28, 29, 30, 31, 32,
+            ]),
+        );
+        assert!(
+            KeyManager::verify(
+                message.as_bytes(),
+                &key_manager.public_key_point_pallas,
+                &signature
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_schnorr_signature1() {
+        let (secret_key, _, _, _) = utils::testing_keys1();
+        test_schnorr_signature(secret_key);
+    }
+
+    #[test]
+    fn test_schnorr_signature2() {
+        let (secret_key, _, _, _) = utils::testing_keys2();
+        test_schnorr_signature(secret_key);
+    }
+
+    #[test]
+    fn test_signature_failure() {
+        let (secret_key1, _, _, _) = utils::testing_keys1();
+        let key_manager1 = KeyManager::new(secret_key1).unwrap();
+        let (secret_key2, _, _, _) = utils::testing_keys2();
+        let key_manager2 = KeyManager::new(secret_key2).unwrap();
+        let message = "Hello, world!";
+        let nonce = U256::from_little_endian(&[
+            1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+            24, 25, 26, 27, 28, 29, 30, 31, 32,
+        ]);
+        let signature = key_manager1.sign(message.as_bytes(), nonce);
+        assert!(
+            !KeyManager::verify(
+                message.as_bytes(),
+                &key_manager2.public_key_point_pallas,
+                &signature
+            )
+            .is_ok()
+        );
+    }
+
     fn test_ed25519_signature(secret_key: U256) {
         let key_manager = KeyManager::new(secret_key).unwrap();
         let message = "Hello, world!";
@@ -249,8 +351,8 @@ mod tests {
         signature_bytes.copy_from_slice(signature.as_slice());
         assert!(
             KeyManager::verify_ed25519(
-                key_manager.public_key_25519(),
                 message.as_bytes(),
+                key_manager.public_key_25519(),
                 &signature_bytes
             )
             .is_ok()
@@ -281,8 +383,8 @@ mod tests {
         signature_bytes.copy_from_slice(signature.as_slice());
         assert!(
             !KeyManager::verify_ed25519(
-                key_manager2.public_key_25519(),
                 message.as_bytes(),
+                key_manager2.public_key_25519(),
                 &signature_bytes
             )
             .is_ok()
@@ -344,7 +446,7 @@ mod tests {
         let mut signature_bytes = [0u8; ed25519_dalek::SIGNATURE_LENGTH];
         signature_bytes.copy_from_slice(signature.as_slice());
         assert!(
-            KeyManager::verify_ed25519(public_key, message.as_bytes(), &signature_bytes).is_ok()
+            KeyManager::verify_ed25519(message.as_bytes(), public_key, &signature_bytes).is_ok()
         );
     }
 
