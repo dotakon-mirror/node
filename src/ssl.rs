@@ -1,5 +1,4 @@
 use anyhow::{self, Context};
-use curve25519_dalek::{Scalar as Scalar25519, scalar::clamp_integer};
 use ed25519_dalek::{self, Verifier};
 use pasta_curves::{group::GroupEncoding, pallas::Point as PointPallas};
 use primitive_types::U256;
@@ -48,9 +47,7 @@ pub fn generate_certificate(
             key_manager.public_key().to_big_endian().to_vec(),
         ));
 
-    let signature = key_manager.prove_public_key_identity(Scalar25519::from_bytes_mod_order(
-        clamp_integer(secret_nonce.to_little_endian()),
-    ));
+    let signature = key_manager.prove_public_key_identity(secret_nonce);
     let identity_signature_oid: Vec<u64> = utils::OID_DOTAKON_IDENTITY_SIGNATURE_DUAL_SCHNORR
         .iter()
         .unwrap()
