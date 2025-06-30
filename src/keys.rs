@@ -311,21 +311,21 @@ mod tests {
 
     #[test]
     fn test_schnorr_signature1() {
-        let (secret_key, _, _, _) = utils::testing_keys1();
+        let (secret_key, _, _) = utils::testing_keys1();
         test_schnorr_signature(secret_key);
     }
 
     #[test]
     fn test_schnorr_signature2() {
-        let (secret_key, _, _, _) = utils::testing_keys2();
+        let (secret_key, _, _) = utils::testing_keys2();
         test_schnorr_signature(secret_key);
     }
 
     #[test]
     fn test_signature_failure() {
-        let (secret_key1, _, _, _) = utils::testing_keys1();
+        let (secret_key1, _, _) = utils::testing_keys1();
         let key_manager1 = KeyManager::new(secret_key1).unwrap();
-        let (secret_key2, _, _, _) = utils::testing_keys2();
+        let (secret_key2, _, _) = utils::testing_keys2();
         let key_manager2 = KeyManager::new(secret_key2).unwrap();
         let message = "Hello, world!";
         let nonce = U256::from_little_endian(&[
@@ -361,21 +361,21 @@ mod tests {
 
     #[test]
     fn test_ed25519_signature1() {
-        let (secret_key, _, _, _) = utils::testing_keys1();
+        let (secret_key, _, _) = utils::testing_keys1();
         test_ed25519_signature(secret_key);
     }
 
     #[test]
     fn test_ed25519_signature2() {
-        let (secret_key, _, _, _) = utils::testing_keys2();
+        let (secret_key, _, _) = utils::testing_keys2();
         test_ed25519_signature(secret_key);
     }
 
     #[test]
     fn test_ed25519_signature_failure() {
-        let (secret_key1, _, _, _) = utils::testing_keys1();
+        let (secret_key1, _, _) = utils::testing_keys1();
         let key_manager1 = KeyManager::new(secret_key1).unwrap();
-        let (secret_key2, _, _, _) = utils::testing_keys2();
+        let (secret_key2, _, _) = utils::testing_keys2();
         let key_manager2 = KeyManager::new(secret_key2).unwrap();
         let message = "Hello, world!";
         let signature = key_manager1.sign_ed25519(message.as_bytes());
@@ -393,7 +393,7 @@ mod tests {
 
     #[test]
     fn test_remote_key_pair_construction() {
-        let (secret_key, _, public_key, _) = utils::testing_keys1();
+        let (secret_key, _, public_key) = utils::testing_keys1();
         let public_key_vec = public_key.to_big_endian().to_vec();
         let km1 = KeyManager::new(secret_key).unwrap();
         let km2 = Box::new(KeyManager::new(secret_key).unwrap());
@@ -408,7 +408,7 @@ mod tests {
 
     #[test]
     fn test_remote_key_pair_algorithm() {
-        let (secret_key, _, _, _) = utils::testing_keys1();
+        let (secret_key, _, _) = utils::testing_keys1();
         let key_manager = KeyManager::new(secret_key).unwrap();
         let remote_key_pair: Box<dyn rcgen::RemoteKeyPair> =
             Box::new(RemoteEd25519KeyPair::from(&key_manager));
@@ -427,13 +427,13 @@ mod tests {
 
     #[test]
     fn test_remote_key_pair_public_key1() {
-        let (secret_key, _, public_key, _) = utils::testing_keys1();
+        let (secret_key, _, public_key) = utils::testing_keys1();
         test_remote_key_pair_public_key(secret_key, public_key);
     }
 
     #[test]
     fn test_remote_key_pair_public_key2() {
-        let (secret_key, _, public_key, _) = utils::testing_keys2();
+        let (secret_key, _, public_key) = utils::testing_keys2();
         test_remote_key_pair_public_key(secret_key, public_key);
     }
 
@@ -452,13 +452,13 @@ mod tests {
 
     #[test]
     fn test_remote_key_pair_signature1() {
-        let (secret_key, _, public_key, _) = utils::testing_keys1();
+        let (secret_key, _, public_key) = utils::testing_keys1();
         test_remote_key_pair_signature(secret_key, public_key);
     }
 
     #[test]
     fn test_remote_key_pair_signature2() {
-        let (secret_key, _, public_key, _) = utils::testing_keys2();
+        let (secret_key, _, public_key) = utils::testing_keys2();
         test_remote_key_pair_signature(secret_key, public_key);
     }
 
@@ -480,19 +480,19 @@ mod tests {
 
     #[test]
     fn test_key_identity_proof1() {
-        let (secret_key, _, _, _) = utils::testing_keys1();
+        let (secret_key, _, _) = utils::testing_keys1();
         test_key_identity_proof(secret_key);
     }
 
     #[test]
     fn test_key_identity_proof2() {
-        let (secret_key, _, _, _) = utils::testing_keys2();
+        let (secret_key, _, _) = utils::testing_keys2();
         test_key_identity_proof(secret_key);
     }
 
     #[test]
     fn test_key_identity_proof_determinism() {
-        let (secret_key, _, _, _) = utils::testing_keys1();
+        let (secret_key, _, _) = utils::testing_keys1();
         let key_manager = KeyManager::new(secret_key).unwrap();
         let signature1 = key_manager.prove_public_key_identity(U256::from_little_endian(&[
             1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
@@ -512,9 +512,9 @@ mod tests {
 
     #[test]
     fn test_key_identity_proof_failure() {
-        let (secret_key1, _, _, _) = utils::testing_keys1();
+        let (secret_key1, _, _) = utils::testing_keys1();
         let key_manager1 = KeyManager::new(secret_key1).unwrap();
-        let (secret_key2, _, _, _) = utils::testing_keys2();
+        let (secret_key2, _, _) = utils::testing_keys2();
         let key_manager2 = KeyManager::new(secret_key2).unwrap();
         let signature = key_manager1.prove_public_key_identity(U256::from_little_endian(&[
             1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,

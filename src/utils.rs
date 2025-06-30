@@ -201,7 +201,7 @@ pub fn format_wallet_address(wallet_address: U256) -> String {
 
 // TODO: make this production code?
 #[cfg(test)]
-fn make_test_keys(secret_key: &str) -> (U256, U256, U256, U256) {
+fn make_test_keys(secret_key: &str) -> (U256, U256, U256) {
     use ed25519_dalek;
     use pasta_curves::group::Group;
     let secret_key = U256::from_str_radix(secret_key, 16).unwrap();
@@ -211,32 +211,30 @@ fn make_test_keys(secret_key: &str) -> (U256, U256, U256, U256) {
         PointPallas::generator() * c25519_scalar_to_pallas_scalar(private_key_25519);
     let public_key_25519 = Point25519::mul_base(&private_key_25519);
     let compressed_pallas_key = compress_point_pallas(&public_key_pallas);
-    let wallet_address = public_key_to_wallet_address(compressed_pallas_key);
     (
         secret_key,
         compressed_pallas_key,
         compress_point_c25519(&public_key_25519),
-        wallet_address,
     )
 }
 
 /// WARNING: FOR TESTS ONLY, DO NOT use this key for anything else. They're leaked. If you create a
 /// wallet with this, all your funds will be permanently LOST.
 ///
-/// The four returned components are: the secret key, the public Pallas key, the public Curve25519
-/// key, and the wallet address.
+/// The three returned components are: the secret key, the public Pallas key, and the public
+/// Curve25519 key.
 #[cfg(test)]
-pub fn testing_keys1() -> (U256, U256, U256, U256) {
+pub fn testing_keys1() -> (U256, U256, U256) {
     make_test_keys("0xb0276914bf0f850d27771adb1abb62b2674e041b63c86c8cd0d7520355ae7c0".into())
 }
 
 /// WARNING: FOR TESTS ONLY, DO NOT use this key for anything else. They're leaked. If you create a
 /// wallet with this, all your funds will be permanently LOST.
 ///
-/// The four returned components are: the secret key, the public Pallas key, the public Curve25519
-/// key, and the wallet address.
+/// The three returned components are: the secret key, the public Pallas key, and the public
+/// Curve25519 key.
 #[cfg(test)]
-pub fn testing_keys2() -> (U256, U256, U256, U256) {
+pub fn testing_keys2() -> (U256, U256, U256) {
     make_test_keys("0xfc56ce55997c46f1ba0bce9a8a4daead405c29edf4066a2cd7d0419f592392b".into())
 }
 
@@ -426,7 +424,8 @@ mod tests {
 
     #[test]
     fn test_format_wallet_address1() {
-        let (_, _, _, wallet_address) = testing_keys1();
+        let (_, public_key, _) = testing_keys1();
+        let wallet_address = public_key_to_wallet_address(public_key);
         assert_eq!(
             format_wallet_address(wallet_address),
             "0x876431d0e6aaa0c15d752f1b73540761e8226aef004fa633f0571435a0786a7d"
@@ -435,7 +434,8 @@ mod tests {
 
     #[test]
     fn test_format_wallet_address2() {
-        let (_, _, _, wallet_address) = testing_keys2();
+        let (_, public_key, _) = testing_keys2();
+        let wallet_address = public_key_to_wallet_address(public_key);
         assert_eq!(
             format_wallet_address(wallet_address),
             "0x20502edb6f0580d8b792a712b8235bc69a5912d6b20c2894e936c9bcf8fd4af7"
@@ -444,7 +444,7 @@ mod tests {
 
     #[test]
     fn test_schnorr_signature_encoding() {
-        let (secret_key, _, _, _) = testing_keys1();
+        let (secret_key, _, _) = testing_keys1();
         let ed25519_signing_key =
             ed25519_dalek::SigningKey::from_bytes(&secret_key.to_little_endian());
         let private_key_25519 = ed25519_signing_key.to_scalar();
@@ -470,7 +470,7 @@ mod tests {
 
     #[test]
     fn test_dual_schnorr_signature_encoding() {
-        let (secret_key, _, _, _) = testing_keys1();
+        let (secret_key, _, _) = testing_keys1();
         let ed25519_signing_key =
             ed25519_dalek::SigningKey::from_bytes(&secret_key.to_little_endian());
         let private_key_25519 = ed25519_signing_key.to_scalar();

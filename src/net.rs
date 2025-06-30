@@ -327,6 +327,7 @@ mod tests {
         node_service_v1_server::NodeServiceV1Server,
     };
     use crate::fake::FakeNodeService;
+    use crate::utils::public_key_to_wallet_address;
     use std::sync::Mutex;
     use tokio::{self, sync::Notify};
     use tonic::{Request, transport::Channel, transport::Server};
@@ -338,16 +339,14 @@ mod tests {
             24, 25, 26, 27, 28, 29, 30, 0, 0,
         ]);
 
-        let (server_secret_key, server_public_key, _, server_wallet_address) =
-            utils::testing_keys1();
+        let (server_secret_key, server_public_key, _) = utils::testing_keys1();
         let server_key_manager = Arc::new(keys::KeyManager::new(server_secret_key).unwrap());
         let server_certificate = Arc::new(
             ssl::generate_certificate(server_key_manager.clone(), "server".to_string(), nonce)
                 .unwrap(),
         );
 
-        let (client_secret_key, client_public_key, _, client_wallet_address) =
-            utils::testing_keys2();
+        let (client_secret_key, client_public_key, _) = utils::testing_keys2();
         let client_key_manager = Arc::new(keys::KeyManager::new(client_secret_key).unwrap());
         let client_certificate = Arc::new(
             ssl::generate_certificate(client_key_manager.clone(), "client".to_string(), nonce)
@@ -368,7 +367,7 @@ mod tests {
                         .peer_public_key()
                 );
                 assert_eq!(
-                    client_wallet_address,
+                    public_key_to_wallet_address(client_public_key),
                     request
                         .extensions()
                         .get::<ConnectionInfo>()
