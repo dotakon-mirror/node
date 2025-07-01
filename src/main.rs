@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use clap::Parser;
 use dotakon::node_service_v1_server::NodeServiceV1Server;
 use primitive_types::U256;
@@ -8,6 +8,7 @@ use tonic::transport::Server;
 
 mod keys;
 mod net;
+mod proto;
 mod service;
 mod ssl;
 mod utils;
@@ -43,13 +44,15 @@ struct Args {
     #[arg(long)]
     port: u16,
 
-    /// The latitude of the self-declared geographical location of the node.
+    /// The latitude of the self-declared geographical location of the node, expressed in degrees
+    /// between -90.0 and +90.0.
     #[arg(long)]
-    latitude: u64,
+    latitude: f64,
 
-    /// The longitude of the self-declared geographical location of the node.
+    /// The longitude of the self-declared geographical location of the node, expressed in degrees
+    /// between 0.0 and 180.0.
     #[arg(long)]
-    longitude: u64,
+    longitude: f64,
 
     /// A list of well-known nodes to connect to in order to join an existing network. If the list
     /// is left empty this node will start a new network.
@@ -61,6 +64,19 @@ fn get_random() -> U256 {
     let mut bytes = [0u8; 32];
     OsRng.fill_bytes(&mut bytes);
     U256::from_little_endian(&bytes)
+}
+
+fn make_location(latitude: f64, longitude: f64) -> Result<dotakon::GeographicalLocation> {
+    if latitude < -90.0 || latitude > 90.0 {
+        return Err(anyhow!("the latitude is out of range"));
+    }
+    if longitude < 0.0 || longitude > 180.0 {
+        return Err(anyhow!("the longitude is out of range"));
+    }
+    Ok(dotakon::GeographicalLocation {
+        latitude: Some((latitude * 60.0) as i32),
+        longitude: Some((longitude * 60.0) as u32),
+    })
 }
 
 #[tokio::main]
@@ -78,13 +94,18 @@ async fn main() -> Result<()> {
     let key_manager = Arc::new(keys::KeyManager::new(secret_key)?);
     let certificate = Arc::new(ssl::generate_certificate(
         key_manager.clone(),
-        args.public_address,
+        args.public_address.clone(),
         /*nonce=*/ get_random(),
     )?);
 
-    let server = Server::builder().add_service(NodeServiceV1Server::new(
-        service::NodeService::new(key_manager.clone()),
-    ));
+    let location = make_location(args.latitude, args.longitude)?;
+    let server =
+        Server::builder().add_service(NodeServiceV1Server::new(service::NodeService::new(
+            key_manager.clone(),
+            location,
+            args.public_address.as_str(),
+            args.port,
+        )));
 
     let local_address = format!("{}:{}", args.local_address, args.port);
     println!("listening on {}", local_address);
