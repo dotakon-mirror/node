@@ -5,6 +5,11 @@ use prost;
 
 const MAX_VARINT_LENGTH: usize = 10;
 
+impl prost::Name for dotakon::Bytes32 {
+    const NAME: &'static str = "Bytes32";
+    const PACKAGE: &'static str = "dotakon";
+}
+
 impl prost::Name for dotakon::node_identity::Payload {
     const NAME: &'static str = "NodeIdentity.Payload";
     const PACKAGE: &'static str = "dotakon";
@@ -89,11 +94,6 @@ mod tests {
             24, 25, 26, 27, 28, 29, 30, 31, 32,
         ]);
         assert_eq!(value, decode_bytes32(&encode_bytes32(value)));
-    }
-
-    impl prost::Name for dotakon::Bytes32 {
-        const NAME: &'static str = "Bytes32";
-        const PACKAGE: &'static str = "dotakon";
     }
 
     #[test]
