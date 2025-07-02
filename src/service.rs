@@ -1,3 +1,4 @@
+use crate::db::Db;
 use crate::dotakon::{self, node_service_v1_server::NodeServiceV1};
 use crate::proto;
 use crate::utils;
@@ -5,6 +6,7 @@ use crate::{keys, net};
 use anyhow::{Context, Result};
 use primitive_types::U256;
 use rand_core::{OsRng, RngCore};
+use std::fs::File;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -17,10 +19,10 @@ fn get_random() -> U256 {
     U256::from_little_endian(&bytes)
 }
 
-#[derive(Debug)]
 pub struct NodeService {
     key_manager: Arc<keys::KeyManager>,
     identity: dotakon::node_identity::Payload,
+    db: Db,
 }
 
 impl NodeService {
@@ -60,6 +62,7 @@ impl NodeService {
         location: dotakon::GeographicalLocation,
         public_address: &str,
         port: u16,
+        data_file: File,
     ) -> Self {
         println!("Public key: {:#x}", key_manager.public_key());
         println!(
@@ -74,6 +77,7 @@ impl NodeService {
         Self {
             key_manager,
             identity,
+            db: Db::new(data_file),
         }
     }
 
@@ -134,9 +138,34 @@ impl NodeServiceV1 for NodeService {
 
     async fn get_account_balance(
         &self,
-        _request: Request<dotakon::GetAccountBalanceRequest>,
+        request: Request<dotakon::GetAccountBalanceRequest>,
     ) -> Result<Response<dotakon::GetAccountBalanceResponse>, Status> {
-        todo!()
+        let request = request.get_ref();
+        match request.account_address {
+            Some(account_address) => {
+                let account_address = proto::decode_bytes32(&account_address);
+                match request.block_number {
+                    Some(block_number) => {
+                        let balance = self
+                            .db
+                            .get_balance(account_address, block_number as usize)
+                            .map_err(|_| Status::invalid_argument("invalid block number"))?;
+                        Ok(Response::new(dotakon::GetAccountBalanceResponse {
+                            block_number: Some(block_number),
+                            balance: Some(proto::encode_bytes32(balance)),
+                        }))
+                    }
+                    None => {
+                        let (version, balance) = self.db.get_latest_balance(account_address);
+                        Ok(Response::new(dotakon::GetAccountBalanceResponse {
+                            block_number: Some(version as u64),
+                            balance: Some(proto::encode_bytes32(balance)),
+                        }))
+                    }
+                }
+            }
+            None => Err(Status::invalid_argument("missing account address")),
+        }
     }
 
     type RefactorNetworkStream =
@@ -158,6 +187,7 @@ mod tests {
         node_service_v1_server::NodeServiceV1Server,
     };
     use crate::ssl;
+    use tempfile::tempfile;
     use tokio::sync::Notify;
     use tonic::transport::Server;
 
@@ -190,6 +220,7 @@ mod tests {
             },
             "localhost",
             8081,
+            tempfile().unwrap(),
         ));
 
         let server_ready = Arc::new(Notify::new());
@@ -236,6 +267,23 @@ mod tests {
             )
             .is_ok()
         );
+
+        let protocol_version = &payload.protocol_version.unwrap();
+        assert_eq!(protocol_version.major.unwrap(), 1);
+        assert_eq!(protocol_version.minor.unwrap(), 0);
+        assert_eq!(protocol_version.build.unwrap(), 0);
+
+        assert_eq!(
+            proto::decode_bytes32(&payload.wallet_address.unwrap()),
+            utils::public_key_to_wallet_address(server_public_key)
+        );
+
+        let location = &payload.location.unwrap();
+        assert_eq!(location.latitude.unwrap(), 71i32);
+        assert_eq!(location.longitude.unwrap(), 104u32);
+
+        assert_eq!(payload.network_address.unwrap(), "localhost");
+        assert_eq!(payload.grpc_port.unwrap(), 8081u32);
 
         server.abort();
     }

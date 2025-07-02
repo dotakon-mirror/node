@@ -3,9 +3,11 @@ use clap::Parser;
 use dotakon::node_service_v1_server::NodeServiceV1Server;
 use primitive_types::U256;
 use rand_core::{OsRng, RngCore};
+use std::fs::File;
 use std::sync::Arc;
 use tonic::transport::Server;
 
+mod db;
 mod keys;
 mod net;
 mod proto;
@@ -58,6 +60,10 @@ struct Args {
     /// is left empty this node will start a new network.
     #[arg(long, default_value = "")]
     bootstrap_list: Vec<String>,
+
+    /// Path of the file where the blockchain data is stored.
+    #[arg(long)]
+    db_path: String,
 }
 
 fn get_random() -> U256 {
@@ -99,12 +105,14 @@ async fn main() -> Result<()> {
     )?);
 
     let location = make_location(args.latitude, args.longitude)?;
+    let data_file = File::open(args.db_path)?;
     let server =
         Server::builder().add_service(NodeServiceV1Server::new(service::NodeService::new(
             key_manager.clone(),
             location,
             args.public_address.as_str(),
             args.port,
+            data_file,
         )));
 
     let local_address = format!("{}:{}", args.local_address, args.port);
