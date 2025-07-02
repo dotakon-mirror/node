@@ -364,7 +364,7 @@ mod tests {
     #[test]
     fn test_certificate_generation() {
         let (secret_key, public_key_pallas, public_key_25519) = utils::testing_keys1();
-        let key_manager = Arc::new(keys::KeyManager::new(secret_key).unwrap());
+        let key_manager = Arc::new(keys::KeyManager::new(secret_key));
         let nonce = U256::from_little_endian(&[
             1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
             24, 25, 26, 27, 28, 29, 30, 0, 0,
@@ -423,7 +423,7 @@ mod tests {
     }
 
     fn test_recover_public_keys(secret_key: U256) {
-        let key_manager = Arc::new(keys::KeyManager::new(secret_key).unwrap());
+        let key_manager = Arc::new(keys::KeyManager::new(secret_key));
         let nonce = U256::from_little_endian(&[
             1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
             24, 25, 26, 27, 28, 29, 30, 0, 0,
@@ -458,7 +458,7 @@ mod tests {
     #[test]
     fn test_certificate_validity() {
         let (secret_key, _, _) = utils::testing_keys1();
-        let key_manager = Arc::new(keys::KeyManager::new(secret_key).unwrap());
+        let key_manager = Arc::new(keys::KeyManager::new(secret_key));
         let nonce = U256::from_little_endian(&[
             1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
             24, 25, 26, 27, 28, 29, 30, 0, 0,
@@ -510,7 +510,7 @@ mod tests {
     #[test]
     fn test_client_certificate_verification() {
         let (secret_key, _, _) = utils::testing_keys1();
-        let key_manager = Arc::new(keys::KeyManager::new(secret_key).unwrap());
+        let key_manager = Arc::new(keys::KeyManager::new(secret_key));
         let nonce = U256::from_little_endian(&[
             1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
             24, 25, 26, 27, 28, 29, 30, 0, 0,
@@ -528,7 +528,7 @@ mod tests {
     #[test]
     fn test_not_yet_valid_client_certificate_verification() {
         let (secret_key, _, _) = utils::testing_keys1();
-        let key_manager = Arc::new(keys::KeyManager::new(secret_key).unwrap());
+        let key_manager = Arc::new(keys::KeyManager::new(secret_key));
         let nonce = U256::from_little_endian(&[
             1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
             24, 25, 26, 27, 28, 29, 30, 0, 0,
@@ -553,7 +553,7 @@ mod tests {
     #[test]
     fn test_expired_client_certificate_verification() {
         let (secret_key, _, _) = utils::testing_keys1();
-        let key_manager = Arc::new(keys::KeyManager::new(secret_key).unwrap());
+        let key_manager = Arc::new(keys::KeyManager::new(secret_key));
         let nonce = U256::from_little_endian(&[
             1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
             24, 25, 26, 27, 28, 29, 30, 0, 0,
@@ -609,7 +609,7 @@ mod tests {
         ]);
 
         let (server_secret_key, _, _) = utils::testing_keys1();
-        let server_key_manager = Arc::new(keys::KeyManager::new(server_secret_key).unwrap());
+        let server_key_manager = Arc::new(keys::KeyManager::new(server_secret_key));
         let server_certificate =
             generate_certificate(server_key_manager.clone(), "server".to_string(), nonce).unwrap();
         let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(
@@ -627,7 +627,7 @@ mod tests {
         ));
 
         let (client_secret_key, _, _) = utils::testing_keys2();
-        let client_key_manager = Arc::new(keys::KeyManager::new(client_secret_key).unwrap());
+        let client_key_manager = Arc::new(keys::KeyManager::new(client_secret_key));
         let client_certificate =
             generate_certificate(client_key_manager.clone(), "client".to_string(), nonce).unwrap();
         let connector = tokio_rustls::TlsConnector::from(Arc::new(

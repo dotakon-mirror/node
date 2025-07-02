@@ -379,14 +379,14 @@ mod tests {
         ]);
 
         let (server_secret_key, server_public_key, _) = utils::testing_keys1();
-        let server_key_manager = Arc::new(keys::KeyManager::new(server_secret_key).unwrap());
+        let server_key_manager = Arc::new(keys::KeyManager::new(server_secret_key));
         let server_certificate = Arc::new(
             ssl::generate_certificate(server_key_manager.clone(), "server".to_string(), nonce)
                 .unwrap(),
         );
 
         let (client_secret_key, client_public_key, _) = utils::testing_keys2();
-        let client_key_manager = Arc::new(keys::KeyManager::new(client_secret_key).unwrap());
+        let client_key_manager = Arc::new(keys::KeyManager::new(client_secret_key));
         let client_certificate = Arc::new(
             ssl::generate_certificate(client_key_manager.clone(), "client".to_string(), nonce)
                 .unwrap(),
@@ -433,8 +433,8 @@ mod tests {
         start_client.notified().await;
 
         let (channel, connection_info) = connect_with_mtls(
-            client_key_manager.clone(),
-            client_certificate.clone(),
+            client_key_manager,
+            client_certificate,
             "http://localhost:8080".parse().unwrap(),
         )
         .await
@@ -453,5 +453,82 @@ mod tests {
 
         server.abort();
         assert!(*(client_checked.lock().unwrap()));
+    }
+
+    fn generate_invalid_certificate(
+        key_manager: &Arc<keys::KeyManager>,
+        canonical_address: &str,
+    ) -> Result<rcgen::Certificate> {
+        let params = rcgen::CertificateParams::new(vec![canonical_address.to_string()])?;
+        let key_pair = rcgen::KeyPair::from_remote(Box::new(keys::RemoteEd25519KeyPair::from(
+            key_manager.clone(),
+        )))?;
+        Ok(params.self_signed(&key_pair)?)
+    }
+
+    #[tokio::test]
+    async fn test_invalid_client_certificate() {
+        let nonce = U256::from_little_endian(&[
+            1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+            24, 25, 26, 27, 28, 29, 30, 0, 0,
+        ]);
+
+        let (server_secret_key, server_public_key, _) = utils::testing_keys1();
+        let server_key_manager = Arc::new(keys::KeyManager::new(server_secret_key));
+        let server_certificate = Arc::new(
+            ssl::generate_certificate(server_key_manager.clone(), "server".to_string(), nonce)
+                .unwrap(),
+        );
+
+        let (client_secret_key, _, _) = utils::testing_keys2();
+        let client_key_manager = Arc::new(keys::KeyManager::new(client_secret_key));
+        let client_certificate =
+            Arc::new(generate_invalid_certificate(&client_key_manager, "client").unwrap());
+
+        let service = NodeServiceV1Server::with_interceptor(
+            FakeNodeService {},
+            move |request: Request<()>| {
+                assert!(request.extensions().get::<ConnectionInfo>().is_none());
+                Ok(request)
+            },
+        );
+
+        let server_ready = Arc::new(Notify::new());
+        let start_client = server_ready.clone();
+        let server = tokio::task::spawn(async move {
+            let future = Server::builder().add_service(service).serve_with_incoming(
+                IncomingWithMTls::new("localhost:8081", server_key_manager, server_certificate)
+                    .await
+                    .unwrap(),
+            );
+            server_ready.notify_one();
+            future.await.unwrap();
+        });
+        start_client.notified().await;
+
+        assert!(
+            async {
+                let (channel, connection_info) = connect_with_mtls(
+                    client_key_manager,
+                    client_certificate,
+                    "http://localhost:8081".parse().unwrap(),
+                )
+                .await?;
+                assert_eq!(server_public_key, connection_info.peer_public_key());
+                assert_eq!(
+                    utils::public_key_to_wallet_address(server_public_key),
+                    connection_info.peer_wallet_address()
+                );
+                let mut client = NodeServiceV1Client::new(channel);
+                client
+                    .get_identity(dotakon::GetIdentityRequest::default())
+                    .await?;
+                Ok::<(), anyhow::Error>(())
+            }
+            .await
+            .is_err()
+        );
+
+        server.abort();
     }
 }

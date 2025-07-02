@@ -7,6 +7,7 @@ use tonic::{Request, Response, Status, Streaming};
 #[cfg(test)]
 pub struct FakeNodeService {}
 
+#[cfg(test)]
 #[tonic::async_trait]
 impl NodeServiceV1 for FakeNodeService {
     async fn get_identity(

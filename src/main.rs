@@ -97,7 +97,7 @@ async fn main() -> Result<()> {
         U256::from_str_radix(args.secret_key.as_str(), 16)?
     };
 
-    let key_manager = Arc::new(keys::KeyManager::new(secret_key)?);
+    let key_manager = Arc::new(keys::KeyManager::new(secret_key));
     let certificate = Arc::new(ssl::generate_certificate(
         key_manager.clone(),
         args.public_address.clone(),

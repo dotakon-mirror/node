@@ -199,14 +199,14 @@ mod tests {
         ]);
 
         let (server_secret_key, server_public_key, _) = utils::testing_keys1();
-        let server_key_manager = Arc::new(keys::KeyManager::new(server_secret_key).unwrap());
+        let server_key_manager = Arc::new(keys::KeyManager::new(server_secret_key));
         let server_certificate = Arc::new(
             ssl::generate_certificate(server_key_manager.clone(), "server".to_string(), nonce)
                 .unwrap(),
         );
 
         let (client_secret_key, _, _) = utils::testing_keys2();
-        let client_key_manager = Arc::new(keys::KeyManager::new(client_secret_key).unwrap());
+        let client_key_manager = Arc::new(keys::KeyManager::new(client_secret_key));
         let client_certificate = Arc::new(
             ssl::generate_certificate(client_key_manager.clone(), "client".to_string(), nonce)
                 .unwrap(),
@@ -228,7 +228,7 @@ mod tests {
         let server = tokio::task::spawn(async move {
             let future = Server::builder().add_service(service).serve_with_incoming(
                 net::IncomingWithMTls::new(
-                    "localhost:8081",
+                    "localhost:8082",
                     server_key_manager,
                     server_certificate,
                 )
@@ -243,7 +243,7 @@ mod tests {
         let (channel, _) = net::connect_with_mtls(
             client_key_manager.clone(),
             client_certificate.clone(),
-            "http://localhost:8081".parse().unwrap(),
+            "http://localhost:8082".parse().unwrap(),
         )
         .await
         .unwrap();

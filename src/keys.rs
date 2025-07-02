@@ -61,7 +61,7 @@ impl KeyManager {
     const SCHNORR_SIGNATURE_DOMAIN_SEPARATOR: &str = "dotakon/schnorr-signature-v1";
     const SCHNORR_IDENTITY_PROOF_DOMAIN_SEPARATOR: &str = "dotakon/schnorr-identity-v1";
 
-    pub fn new(secret_key: U256) -> Result<Self> {
+    pub fn new(secret_key: U256) -> Self {
         let ed25519_signing_key =
             ed25519_dalek::SigningKey::from_bytes(&secret_key.to_little_endian());
 
@@ -74,7 +74,7 @@ impl KeyManager {
         let public_key_point_25519 = Point25519::mul_base(&private_key_25519);
         let public_key_25519 = utils::compress_point_c25519(&public_key_point_25519);
 
-        Ok(Self {
+        Self {
             ed25519_signing_key: Mutex::new(ed25519_signing_key),
             private_key: private_key_25519,
             public_key_point_pallas,
@@ -82,7 +82,7 @@ impl KeyManager {
             public_key_point_25519,
             public_key_25519,
             wallet_address: utils::public_key_to_wallet_address(public_key_pallas),
-        })
+        }
     }
 
     pub fn export_private_key(&self) -> Result<Vec<u8>> {
@@ -326,7 +326,7 @@ mod tests {
             8u8, 7, 6, 5, 4, 3, 2, 1, 16, 15, 14, 13, 12, 11, 10, 9, 24, 23, 22, 21, 20, 19, 18,
             17, 32, 31, 30, 29, 28, 27, 0, 0,
         ]);
-        let key_manager = KeyManager::new(secret_key).unwrap();
+        let key_manager = KeyManager::new(secret_key);
         assert_eq!(
             key_manager.public_key(),
             "0xB90F39D546DDDD466A131BECF6BCB23B5ED621BDB08A1DBD719041EA0D61E6BD"
@@ -348,7 +348,7 @@ mod tests {
     }
 
     fn test_schnorr_signature(secret_key: U256) {
-        let key_manager = KeyManager::new(secret_key).unwrap();
+        let key_manager = KeyManager::new(secret_key);
         let message = "Hello, world!";
         let signature = key_manager.sign(
             message.as_bytes(),
@@ -382,7 +382,7 @@ mod tests {
     #[test]
     fn test_signature_wrong_message() {
         let (secret_key, _, _) = utils::testing_keys1();
-        let key_manager = KeyManager::new(secret_key).unwrap();
+        let key_manager = KeyManager::new(secret_key);
         let nonce = U256::from_little_endian(&[
             1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
             24, 25, 26, 27, 28, 29, 30, 31, 32,
@@ -401,9 +401,9 @@ mod tests {
     #[test]
     fn test_signature_wrong_public_key() {
         let (secret_key1, _, _) = utils::testing_keys1();
-        let key_manager1 = KeyManager::new(secret_key1).unwrap();
+        let key_manager1 = KeyManager::new(secret_key1);
         let (secret_key2, _, _) = utils::testing_keys2();
-        let key_manager2 = KeyManager::new(secret_key2).unwrap();
+        let key_manager2 = KeyManager::new(secret_key2);
         let message = "Hello, world!";
         let nonce = U256::from_little_endian(&[
             1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
@@ -421,7 +421,7 @@ mod tests {
     }
 
     fn test_message_signature(secret_key: U256) {
-        let key_manager = KeyManager::new(secret_key).unwrap();
+        let key_manager = KeyManager::new(secret_key);
         let message = proto::encode_bytes32(U256::from_little_endian(&[
             1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
             24, 25, 26, 27, 28, 29, 30, 31, 32,
@@ -454,7 +454,7 @@ mod tests {
     #[test]
     fn test_message_signature_wrong_message() {
         let (secret_key, _, _) = utils::testing_keys1();
-        let key_manager = KeyManager::new(secret_key).unwrap();
+        let key_manager = KeyManager::new(secret_key);
         let message1 = proto::encode_bytes32(U256::from_little_endian(&[
             1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
             24, 25, 26, 27, 28, 29, 30, 31, 32,
@@ -480,7 +480,7 @@ mod tests {
     #[test]
     fn test_message_signature_wrong_public_key() {
         let (secret_key1, _, _) = utils::testing_keys1();
-        let key_manager = KeyManager::new(secret_key1).unwrap();
+        let key_manager = KeyManager::new(secret_key1);
         let (_, public_key2, _) = utils::testing_keys2();
         let message = proto::encode_bytes32(U256::from_little_endian(&[
             1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
@@ -506,7 +506,7 @@ mod tests {
     #[test]
     fn test_message_signature_wrong_signer_address() {
         let (secret_key1, _, _) = utils::testing_keys1();
-        let key_manager = KeyManager::new(secret_key1).unwrap();
+        let key_manager = KeyManager::new(secret_key1);
         let (_, public_key2, _) = utils::testing_keys2();
         let message = proto::encode_bytes32(U256::from_little_endian(&[
             1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
@@ -531,7 +531,7 @@ mod tests {
     #[test]
     fn test_message_signature_wrong_schema() {
         let (secret_key, _, _) = utils::testing_keys1();
-        let key_manager = KeyManager::new(secret_key).unwrap();
+        let key_manager = KeyManager::new(secret_key);
         let message = proto::encode_bytes32(U256::from_little_endian(&[
             1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
             24, 25, 26, 27, 28, 29, 30, 31, 32,
@@ -551,7 +551,7 @@ mod tests {
     }
 
     fn test_ed25519_signature(secret_key: U256) {
-        let key_manager = KeyManager::new(secret_key).unwrap();
+        let key_manager = KeyManager::new(secret_key);
         let message = "Hello, world!";
         let signature = key_manager.sign_ed25519(message.as_bytes());
         let mut signature_bytes = [0u8; ed25519_dalek::SIGNATURE_LENGTH];
@@ -581,9 +581,9 @@ mod tests {
     #[test]
     fn test_ed25519_signature_failure() {
         let (secret_key1, _, _) = utils::testing_keys1();
-        let key_manager1 = KeyManager::new(secret_key1).unwrap();
+        let key_manager1 = KeyManager::new(secret_key1);
         let (secret_key2, _, _) = utils::testing_keys2();
-        let key_manager2 = KeyManager::new(secret_key2).unwrap();
+        let key_manager2 = KeyManager::new(secret_key2);
         let message = "Hello, world!";
         let signature = key_manager1.sign_ed25519(message.as_bytes());
         let mut signature_bytes = [0u8; ed25519_dalek::SIGNATURE_LENGTH];
@@ -602,9 +602,9 @@ mod tests {
     fn test_remote_key_pair_construction() {
         let (secret_key, _, public_key) = utils::testing_keys1();
         let public_key_vec = public_key.to_big_endian().to_vec();
-        let km1 = KeyManager::new(secret_key).unwrap();
-        let km2 = Box::new(KeyManager::new(secret_key).unwrap());
-        let km3 = Arc::new(KeyManager::new(secret_key).unwrap());
+        let km1 = KeyManager::new(secret_key);
+        let km2 = Box::new(KeyManager::new(secret_key));
+        let km3 = Arc::new(KeyManager::new(secret_key));
         let kp1: Box<dyn rcgen::RemoteKeyPair> = Box::new(RemoteEd25519KeyPair::from(&km1));
         let kp2: Box<dyn rcgen::RemoteKeyPair> = Box::new(RemoteEd25519KeyPair::from(km2));
         let kp3: Box<dyn rcgen::RemoteKeyPair> = Box::new(RemoteEd25519KeyPair::from(km3));
@@ -616,14 +616,14 @@ mod tests {
     #[test]
     fn test_remote_key_pair_algorithm() {
         let (secret_key, _, _) = utils::testing_keys1();
-        let key_manager = KeyManager::new(secret_key).unwrap();
+        let key_manager = KeyManager::new(secret_key);
         let remote_key_pair: Box<dyn rcgen::RemoteKeyPair> =
             Box::new(RemoteEd25519KeyPair::from(&key_manager));
         assert_eq!(remote_key_pair.algorithm(), &rcgen::PKCS_ED25519);
     }
 
     fn test_remote_key_pair_public_key(secret_key: U256, public_key: U256) {
-        let key_manager = KeyManager::new(secret_key).unwrap();
+        let key_manager = KeyManager::new(secret_key);
         let remote_key_pair: Box<dyn rcgen::RemoteKeyPair> =
             Box::new(RemoteEd25519KeyPair::from(&key_manager));
         assert_eq!(
@@ -645,7 +645,7 @@ mod tests {
     }
 
     fn test_remote_key_pair_signature(secret_key: U256, public_key: U256) {
-        let key_manager = KeyManager::new(secret_key).unwrap();
+        let key_manager = KeyManager::new(secret_key);
         let remote_key_pair: Box<dyn rcgen::RemoteKeyPair> =
             Box::new(RemoteEd25519KeyPair::from(&key_manager));
         let message = "SATOR AREPO TENET OPERA ROTAS";
@@ -670,7 +670,7 @@ mod tests {
     }
 
     fn test_key_identity_proof(secret_key: U256) {
-        let key_manager = KeyManager::new(secret_key).unwrap();
+        let key_manager = KeyManager::new(secret_key);
         let signature = key_manager.prove_public_key_identity(U256::from_little_endian(&[
             1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
             24, 25, 26, 27, 28, 29, 30, 0, 0,
@@ -700,7 +700,7 @@ mod tests {
     #[test]
     fn test_key_identity_proof_determinism() {
         let (secret_key, _, _) = utils::testing_keys1();
-        let key_manager = KeyManager::new(secret_key).unwrap();
+        let key_manager = KeyManager::new(secret_key);
         let signature1 = key_manager.prove_public_key_identity(U256::from_little_endian(&[
             1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
             24, 25, 26, 27, 28, 29, 30, 0, 0,
@@ -720,9 +720,9 @@ mod tests {
     #[test]
     fn test_key_identity_proof_failure() {
         let (secret_key1, _, _) = utils::testing_keys1();
-        let key_manager1 = KeyManager::new(secret_key1).unwrap();
+        let key_manager1 = KeyManager::new(secret_key1);
         let (secret_key2, _, _) = utils::testing_keys2();
-        let key_manager2 = KeyManager::new(secret_key2).unwrap();
+        let key_manager2 = KeyManager::new(secret_key2);
         let signature = key_manager1.prove_public_key_identity(U256::from_little_endian(&[
             1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
             24, 25, 26, 27, 28, 29, 30, 0, 0,
