@@ -353,7 +353,6 @@ impl ServerCertVerifier for DotakonServerCertVerifier {
 #[cfg(test)]
 mod tests {
     use super::*;
-
     use anyhow::anyhow;
     use oid_registry;
     use rustls::CommonState;

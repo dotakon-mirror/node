@@ -241,7 +241,6 @@ pub fn testing_keys2() -> (U256, U256, U256) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
     use ed25519_dalek;
     use pasta_curves::group::Group;
 

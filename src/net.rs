@@ -7,14 +7,14 @@ use hyper::rt::{Read, ReadBufCursor, Write};
 use primitive_types::U256;
 use rustls::pki_types::ServerName;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::task::Poll;
 use tokio::{
     io::AsyncRead, io::AsyncWrite, io::ReadBuf, net::TcpListener, net::TcpStream,
     net::ToSocketAddrs,
 };
 use tokio_rustls::{TlsAcceptor, TlsConnector, client, server};
-use tonic::transport::{Uri, server::Connected};
+use tonic::transport::{Channel, Uri, server::Connected};
 use tower;
 use x509_parser;
 
@@ -124,6 +124,10 @@ impl TlsClientStreamAdapter {
             info: ConnectionInfo::new(peer_certificate)?,
             inner: inner_stream,
         })
+    }
+
+    pub fn info(&self) -> &ConnectionInfo {
+        &self.info
     }
 }
 
@@ -251,8 +255,9 @@ impl futures::Stream for IncomingWithMTls {
     }
 }
 
-pub struct ConnectorWithMTls {
+struct ConnectorWithMTls {
     connector: TlsConnector,
+    peer_certificate: Arc<Mutex<Option<rustls::pki_types::CertificateDer<'static>>>>,
 }
 
 impl ConnectorWithMTls {
@@ -261,6 +266,7 @@ impl ConnectorWithMTls {
     pub fn new(
         key_manager: Arc<keys::KeyManager>,
         certificate: Arc<rcgen::Certificate>,
+        peer_certificate: Arc<Mutex<Option<rustls::pki_types::CertificateDer<'static>>>>,
     ) -> Result<ConnectorWithMTls> {
         let connector = tokio_rustls::TlsConnector::from(Arc::new(
             rustls::ClientConfig::builder()
@@ -276,7 +282,14 @@ impl ConnectorWithMTls {
                 )
                 .unwrap(),
         ));
-        Ok(Self { connector })
+        {
+            let mut guard = peer_certificate.lock().unwrap();
+            *guard = None;
+        }
+        Ok(Self {
+            connector,
+            peer_certificate,
+        })
     }
 }
 
@@ -291,6 +304,7 @@ impl tower::Service<Uri> for ConnectorWithMTls {
 
     fn call(&mut self, request: Uri) -> Self::Future {
         let connector = self.connector.clone();
+        let peer_certificate = self.peer_certificate.clone();
         Box::pin(async move {
             let host = request
                 .host()
@@ -309,6 +323,10 @@ impl tower::Service<Uri> for ConnectorWithMTls {
             let certificate = get_peer_certificate(connection).map_err(|error| {
                 std::io::Error::new(std::io::ErrorKind::PermissionDenied, error)
             })?;
+            {
+                let mut guard = peer_certificate.lock().unwrap();
+                *guard = Some(certificate.clone());
+            }
             Ok(
                 TlsClientStreamAdapter::new(stream, certificate).map_err(|error| {
                     std::io::Error::new(std::io::ErrorKind::PermissionDenied, error)
@@ -318,19 +336,40 @@ impl tower::Service<Uri> for ConnectorWithMTls {
     }
 }
 
+pub async fn connect_with_mtls(
+    key_manager: Arc<keys::KeyManager>,
+    certificate: Arc<rcgen::Certificate>,
+    uri: Uri,
+) -> Result<(Channel, ConnectionInfo)> {
+    let peer_certificate = Arc::new(Mutex::new(
+        None::<rustls::pki_types::CertificateDer<'static>>,
+    ));
+    let channel = Channel::builder(uri)
+        .connect_with_connector(
+            ConnectorWithMTls::new(
+                key_manager.clone(),
+                certificate.clone(),
+                peer_certificate.clone(),
+            )
+            .unwrap(),
+        )
+        .await?;
+    let peer_certificate = peer_certificate.lock().unwrap().as_mut().unwrap().clone();
+    let connection_info = ConnectionInfo::new(peer_certificate)?;
+    Ok((channel, connection_info))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
     use crate::dotakon::{
-        GetIdentityRequest, node_service_v1_client::NodeServiceV1Client,
+        self, node_service_v1_client::NodeServiceV1Client,
         node_service_v1_server::NodeServiceV1Server,
     };
     use crate::fake::FakeNodeService;
     use crate::utils::public_key_to_wallet_address;
-    use std::sync::Mutex;
     use tokio::{self, sync::Notify};
-    use tonic::{Request, transport::Channel, transport::Server};
+    use tonic::{Request, transport::Server};
 
     #[tokio::test]
     async fn test_connection() {
@@ -393,16 +432,22 @@ mod tests {
         });
         start_client.notified().await;
 
-        let channel = Channel::builder("http://localhost:8080".parse().unwrap())
-            .connect_with_connector(
-                ConnectorWithMTls::new(client_key_manager.clone(), client_certificate.clone())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let (channel, connection_info) = connect_with_mtls(
+            client_key_manager.clone(),
+            client_certificate.clone(),
+            "http://localhost:8080".parse().unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(server_public_key, connection_info.peer_public_key());
+        assert_eq!(
+            utils::public_key_to_wallet_address(server_public_key),
+            connection_info.peer_wallet_address()
+        );
+
         let mut client = NodeServiceV1Client::new(channel);
         client
-            .get_identity(GetIdentityRequest::default())
+            .get_identity(dotakon::GetIdentityRequest::default())
             .await
             .unwrap();
 

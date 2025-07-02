@@ -93,12 +93,15 @@ impl NodeService {
         Ok(info.peer_wallet_address())
     }
 
-    fn sign_message(&self, message: &prost_types::Any) -> Result<dotakon::Signature> {
+    fn sign_message<M: prost::Message + prost::Name>(
+        &self,
+        message: &M,
+    ) -> Result<dotakon::Signature> {
         self.key_manager.sign_message(message, get_random())
     }
 
-    fn verify_signed_message(
-        message: &prost_types::Any,
+    fn verify_signed_message<M: prost::Message + prost::Name>(
+        message: &M,
         signature: &dotakon::Signature,
     ) -> Result<()> {
         keys::KeyManager::verify_signed_message(message, signature)
@@ -114,7 +117,7 @@ impl NodeServiceV1 for NodeService {
         let payload = prost_types::Any::from_msg(&self.identity)
             .map_err(|_| Status::internal("protobuf encoding error"))?;
         let signature = self
-            .sign_message(&payload)
+            .sign_message(&self.identity)
             .map_err(|_| Status::internal("signature error"))?;
         Ok(Response::new(dotakon::NodeIdentity {
             payload: Some(payload),
@@ -149,5 +152,93 @@ impl NodeServiceV1 for NodeService {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::dotakon::{
+        self, node_service_v1_client::NodeServiceV1Client,
+        node_service_v1_server::NodeServiceV1Server,
+    };
+    use crate::ssl;
+    use tokio::sync::Notify;
+    use tonic::transport::Server;
+
+    #[tokio::test]
+    async fn test_identity() {
+        let nonce = U256::from_little_endian(&[
+            1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+            24, 25, 26, 27, 28, 29, 30, 0, 0,
+        ]);
+
+        let (server_secret_key, server_public_key, _) = utils::testing_keys1();
+        let server_key_manager = Arc::new(keys::KeyManager::new(server_secret_key).unwrap());
+        let server_certificate = Arc::new(
+            ssl::generate_certificate(server_key_manager.clone(), "server".to_string(), nonce)
+                .unwrap(),
+        );
+
+        let (client_secret_key, _, _) = utils::testing_keys2();
+        let client_key_manager = Arc::new(keys::KeyManager::new(client_secret_key).unwrap());
+        let client_certificate = Arc::new(
+            ssl::generate_certificate(client_key_manager.clone(), "client".to_string(), nonce)
+                .unwrap(),
+        );
+
+        let service = NodeServiceV1Server::new(NodeService::new(
+            server_key_manager.clone(),
+            dotakon::GeographicalLocation {
+                latitude: Some(71),
+                longitude: Some(104),
+            },
+            "localhost",
+            8081,
+        ));
+
+        let server_ready = Arc::new(Notify::new());
+        let start_client = server_ready.clone();
+        let server = tokio::task::spawn(async move {
+            let future = Server::builder().add_service(service).serve_with_incoming(
+                net::IncomingWithMTls::new(
+                    "localhost:8081",
+                    server_key_manager,
+                    server_certificate,
+                )
+                .await
+                .unwrap(),
+            );
+            server_ready.notify_one();
+            future.await.unwrap();
+        });
+        start_client.notified().await;
+
+        let (channel, _) = net::connect_with_mtls(
+            client_key_manager.clone(),
+            client_certificate.clone(),
+            "http://localhost:8081".parse().unwrap(),
+        )
+        .await
+        .unwrap();
+        let mut client = NodeServiceV1Client::new(channel);
+
+        let response = client
+            .get_identity(dotakon::GetIdentityRequest::default())
+            .await
+            .unwrap();
+        let identity = response.get_ref();
+        let payload = identity
+            .payload
+            .as_ref()
+            .unwrap()
+            .to_msg::<dotakon::node_identity::Payload>()
+            .unwrap();
+        assert!(
+            keys::KeyManager::verify_signed_message(
+                &payload,
+                &identity.signature.as_ref().unwrap()
+            )
+            .is_ok()
+        );
+
+        server.abort();
+    }
+
     // TODO
 }

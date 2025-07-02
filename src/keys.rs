@@ -149,9 +149,9 @@ impl KeyManager {
         Ok(())
     }
 
-    pub fn sign_message(
+    pub fn sign_message<M: prost::Message + prost::Name>(
         &self,
-        message: &prost_types::Any,
+        message: &M,
         secret_nonce: U256,
     ) -> Result<dotakon::Signature> {
         let bytes = proto::encode_any_canonical(message)?;
@@ -164,8 +164,8 @@ impl KeyManager {
         })
     }
 
-    pub fn verify_signed_message(
-        message: &prost_types::Any,
+    pub fn verify_signed_message<M: prost::Message + prost::Name>(
+        message: &M,
         signature: &dotakon::Signature,
     ) -> Result<()> {
         const SCHNORR_PALLAS_SHA3_256: i32 = dotakon::SignatureScheme::SchnorrPallasSha3256 as i32;
@@ -318,7 +318,6 @@ impl KeyManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-
     use std::sync::Arc;
 
     #[test]
