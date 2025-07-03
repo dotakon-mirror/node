@@ -120,7 +120,12 @@ async fn main() -> Result<()> {
 
     server
         .serve_with_incoming(
-            net::IncomingWithMTls::new(local_address, key_manager, certificate).await?,
+            net::IncomingWithMTls::new(
+                Arc::new(net::TcpListenerAdapter::new(local_address).await.unwrap()),
+                key_manager,
+                certificate,
+            )
+            .await?,
         )
         .await?;
 

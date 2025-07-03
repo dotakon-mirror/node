@@ -189,65 +189,102 @@ mod tests {
     use crate::ssl;
     use tempfile::tempfile;
     use tokio::sync::Notify;
-    use tonic::transport::Server;
+    use tokio::task::JoinHandle;
+    use tonic::transport::{Channel, Server};
+
+    struct TestFixture {
+        server_key_manager: Arc<keys::KeyManager>,
+        client_key_manager: Arc<keys::KeyManager>,
+        server_handle: JoinHandle<()>,
+        client: NodeServiceV1Client<Channel>,
+    }
+
+    impl TestFixture {
+        pub async fn new(location: dotakon::GeographicalLocation) -> Result<Self> {
+            let nonce = U256::from_little_endian(&[
+                1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22,
+                23, 24, 25, 26, 27, 28, 29, 30, 0, 0,
+            ]);
+
+            let (server_secret_key, _, _) = utils::testing_keys1();
+            let server_key_manager = Arc::new(keys::KeyManager::new(server_secret_key));
+            let server_certificate = Arc::new(
+                ssl::generate_certificate(server_key_manager.clone(), "server".to_string(), nonce)
+                    .unwrap(),
+            );
+
+            let (client_secret_key, _, _) = utils::testing_keys2();
+            let client_key_manager = Arc::new(keys::KeyManager::new(client_secret_key));
+            let client_certificate = Arc::new(
+                ssl::generate_certificate(client_key_manager.clone(), "client".to_string(), nonce)
+                    .unwrap(),
+            );
+
+            let service = NodeServiceV1Server::new(NodeService::new(
+                server_key_manager.clone(),
+                location,
+                "localhost",
+                8080,
+                tempfile().unwrap(),
+            ));
+
+            let (server_stream, client_stream) = tokio::io::duplex(4096);
+
+            let server_key_manager_clone = server_key_manager.clone();
+
+            let server_ready = Arc::new(Notify::new());
+            let start_client = server_ready.clone();
+            let server_handle = tokio::task::spawn(async move {
+                let future = Server::builder().add_service(service).serve_with_incoming(
+                    net::IncomingWithMTls::new(
+                        Arc::new(net::MockListener::new(server_stream)),
+                        server_key_manager_clone,
+                        server_certificate,
+                    )
+                    .await
+                    .unwrap(),
+                );
+                server_ready.notify_one();
+                future.await.unwrap();
+            });
+            start_client.notified().await;
+
+            let (channel, _) = net::mock_connect_with_mtls(
+                client_stream,
+                client_key_manager.clone(),
+                client_certificate.clone(),
+            )
+            .await
+            .unwrap();
+            let client = NodeServiceV1Client::new(channel);
+
+            Ok(Self {
+                server_key_manager,
+                client_key_manager,
+                server_handle,
+                client,
+            })
+        }
+
+        pub async fn with_default_location() -> Result<Self> {
+            Self::new(dotakon::GeographicalLocation {
+                latitude: Some(71i32),
+                longitude: Some(104u32),
+            })
+            .await
+        }
+    }
+
+    impl Drop for TestFixture {
+        fn drop(&mut self) {
+            self.server_handle.abort();
+        }
+    }
 
     #[tokio::test]
     async fn test_identity() {
-        let nonce = U256::from_little_endian(&[
-            1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
-            24, 25, 26, 27, 28, 29, 30, 0, 0,
-        ]);
-
-        let (server_secret_key, server_public_key, _) = utils::testing_keys1();
-        let server_key_manager = Arc::new(keys::KeyManager::new(server_secret_key));
-        let server_certificate = Arc::new(
-            ssl::generate_certificate(server_key_manager.clone(), "server".to_string(), nonce)
-                .unwrap(),
-        );
-
-        let (client_secret_key, _, _) = utils::testing_keys2();
-        let client_key_manager = Arc::new(keys::KeyManager::new(client_secret_key));
-        let client_certificate = Arc::new(
-            ssl::generate_certificate(client_key_manager.clone(), "client".to_string(), nonce)
-                .unwrap(),
-        );
-
-        let service = NodeServiceV1Server::new(NodeService::new(
-            server_key_manager.clone(),
-            dotakon::GeographicalLocation {
-                latitude: Some(71),
-                longitude: Some(104),
-            },
-            "localhost",
-            8081,
-            tempfile().unwrap(),
-        ));
-
-        let server_ready = Arc::new(Notify::new());
-        let start_client = server_ready.clone();
-        let server = tokio::task::spawn(async move {
-            let future = Server::builder().add_service(service).serve_with_incoming(
-                net::IncomingWithMTls::new(
-                    "localhost:8082",
-                    server_key_manager,
-                    server_certificate,
-                )
-                .await
-                .unwrap(),
-            );
-            server_ready.notify_one();
-            future.await.unwrap();
-        });
-        start_client.notified().await;
-
-        let (channel, _) = net::connect_with_mtls(
-            client_key_manager.clone(),
-            client_certificate.clone(),
-            "http://localhost:8082".parse().unwrap(),
-        )
-        .await
-        .unwrap();
-        let mut client = NodeServiceV1Client::new(channel);
+        let mut fixture = TestFixture::with_default_location().await.unwrap();
+        let client = &mut fixture.client;
 
         let response = client
             .get_identity(dotakon::GetIdentityRequest::default())
@@ -275,7 +312,7 @@ mod tests {
 
         assert_eq!(
             proto::decode_bytes32(&payload.wallet_address.unwrap()),
-            utils::public_key_to_wallet_address(server_public_key)
+            fixture.server_key_manager.wallet_address()
         );
 
         let location = &payload.location.unwrap();
@@ -283,9 +320,7 @@ mod tests {
         assert_eq!(location.longitude.unwrap(), 104u32);
 
         assert_eq!(payload.network_address.unwrap(), "localhost");
-        assert_eq!(payload.grpc_port.unwrap(), 8081u32);
-
-        server.abort();
+        assert_eq!(payload.grpc_port.unwrap(), 8080u32);
     }
 
     // TODO

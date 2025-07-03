@@ -73,8 +73,8 @@ pub fn u256_to_c25519_scalar(value: U256) -> Result<Scalar25519> {
 pub fn c25519_scalar_to_pallas_scalar(scalar: Scalar25519) -> ScalarPallas {
     // Here it's okay to unwrap without checking because Pallas's order is greater than
     // Curve25519's, so all canonical 25519 scalars are also canonical in Pallas and
-    // `from_repr_vartime` should never panic. If these assumptions don't hold we should definitely
-    // panic.
+    // `from_repr_vartime` should never error out. If these assumptions don't hold we should
+    // definitely panic.
     ScalarPallas::from_repr_vartime(scalar.to_bytes()).unwrap()
 }
 

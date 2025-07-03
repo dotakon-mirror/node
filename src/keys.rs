@@ -124,6 +124,8 @@ impl KeyManager {
         Self::make_signature_challenge(&self.public_key_point_pallas, nonce, message)
     }
 
+    /// WARNING: `secret_nonce` MUST be fresh. Signing two different messages with the same nonce
+    /// allows full private key recovery.
     pub fn sign(&self, message: &[u8], secret_nonce: U256) -> utils::SchnorrPallasSignature {
         let nonce = utils::u256_to_clamped_pallas_scalar(secret_nonce);
         let nonce_point = PointPallas::generator() * nonce;
@@ -149,6 +151,8 @@ impl KeyManager {
         Ok(())
     }
 
+    /// WARNING: `secret_nonce` MUST be fresh. Signing two different messages with the same nonce
+    /// allows full private key recovery.
     pub fn sign_message<M: prost::Message + prost::Name>(
         &self,
         message: &M,
