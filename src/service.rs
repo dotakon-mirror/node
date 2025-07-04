@@ -323,5 +323,79 @@ mod tests {
         assert_eq!(payload.grpc_port.unwrap(), 8080u32);
     }
 
-    // TODO
+    #[tokio::test]
+    async fn test_get_account_balance() {
+        let mut fixture = TestFixture::with_default_location().await.unwrap();
+        let client = &mut fixture.client;
+        let (_, public_key, _) = utils::testing_keys1();
+        let response = client
+            .get_account_balance(dotakon::GetAccountBalanceRequest {
+                block_number: Some(0),
+                account_address: Some(proto::encode_bytes32(utils::public_key_to_wallet_address(
+                    public_key,
+                ))),
+            })
+            .await
+            .unwrap();
+        let response = response.get_ref();
+        assert_eq!(response.block_number.unwrap(), 0);
+        assert_eq!(
+            proto::decode_bytes32(&response.balance.unwrap()),
+            U256::zero()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_latest_account_balance() {
+        let mut fixture = TestFixture::with_default_location().await.unwrap();
+        let client = &mut fixture.client;
+        let (_, public_key, _) = utils::testing_keys1();
+        let response = client
+            .get_account_balance(dotakon::GetAccountBalanceRequest {
+                block_number: None,
+                account_address: Some(proto::encode_bytes32(utils::public_key_to_wallet_address(
+                    public_key,
+                ))),
+            })
+            .await
+            .unwrap();
+        let response = response.get_ref();
+        assert_eq!(response.block_number.unwrap(), 0);
+        assert_eq!(
+            proto::decode_bytes32(&response.balance.unwrap()),
+            U256::zero()
+        );
+    }
+
+    // TODO: test account balance retrieval at a subsequent block.
+
+    #[tokio::test]
+    async fn test_get_invalid_account_balance1() {
+        let mut fixture = TestFixture::with_default_location().await.unwrap();
+        let client = &mut fixture.client;
+        assert!(
+            client
+                .get_account_balance(dotakon::GetAccountBalanceRequest {
+                    block_number: Some(0),
+                    account_address: None,
+                })
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_invalid_account_balance2() {
+        let mut fixture = TestFixture::with_default_location().await.unwrap();
+        let client = &mut fixture.client;
+        assert!(
+            client
+                .get_account_balance(dotakon::GetAccountBalanceRequest {
+                    block_number: None,
+                    account_address: None,
+                })
+                .await
+                .is_err()
+        );
+    }
 }
