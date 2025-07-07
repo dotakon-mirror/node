@@ -9,6 +9,7 @@ use tonic::transport::Server;
 
 mod db;
 mod keys;
+mod mpt;
 mod net;
 mod proto;
 mod service;

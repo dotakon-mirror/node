@@ -161,7 +161,7 @@ impl KeyManager {
         let bytes = proto::encode_any_canonical(message)?;
         let signature = self.sign(bytes.as_slice(), secret_nonce).encode();
         Ok(dotakon::Signature {
-            signer: Some(proto::encode_bytes32(self.wallet_address())),
+            signer: Some(proto::u256_to_bytes32(self.wallet_address())),
             scheme: Some(dotakon::SignatureScheme::SchnorrPallasSha3256.into()),
             public_key: Some(self.public_key_pallas.to_big_endian().to_vec()),
             signature: Some(signature),
@@ -189,7 +189,7 @@ impl KeyManager {
         }?;
         match signature.signer {
             Some(bytes32) => {
-                let signer = proto::decode_bytes32(&bytes32);
+                let signer = proto::u256_from_bytes32(&bytes32);
                 if signer != wallet_address {
                     Err(anyhow!("invalid signature: mismatching signer address"))
                 } else {
@@ -426,7 +426,7 @@ mod tests {
 
     fn test_message_signature(secret_key: U256) {
         let key_manager = KeyManager::new(secret_key);
-        let message = proto::encode_bytes32(U256::from_little_endian(&[
+        let message = proto::u256_to_bytes32(U256::from_little_endian(&[
             1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
             24, 25, 26, 27, 28, 29, 30, 31, 32,
         ]));
@@ -459,7 +459,7 @@ mod tests {
     fn test_message_signature_wrong_message() {
         let (secret_key, _, _) = utils::testing_keys1();
         let key_manager = KeyManager::new(secret_key);
-        let message1 = proto::encode_bytes32(U256::from_little_endian(&[
+        let message1 = proto::u256_to_bytes32(U256::from_little_endian(&[
             1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
             24, 25, 26, 27, 28, 29, 30, 31, 32,
         ]));
@@ -473,7 +473,7 @@ mod tests {
                 ]),
             )
             .unwrap();
-        let message2 = proto::encode_bytes32(U256::from_little_endian(&[
+        let message2 = proto::u256_to_bytes32(U256::from_little_endian(&[
             1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
             24, 25, 26, 27, 28, 29, 32, 31, 30,
         ]));
@@ -486,7 +486,7 @@ mod tests {
         let (secret_key1, _, _) = utils::testing_keys1();
         let key_manager = KeyManager::new(secret_key1);
         let (_, public_key2, _) = utils::testing_keys2();
-        let message = proto::encode_bytes32(U256::from_little_endian(&[
+        let message = proto::u256_to_bytes32(U256::from_little_endian(&[
             1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
             24, 25, 26, 27, 28, 29, 30, 31, 32,
         ]));
@@ -501,7 +501,7 @@ mod tests {
             )
             .unwrap();
         signature.public_key = Some(public_key2.to_big_endian().to_vec());
-        signature.signer = Some(proto::encode_bytes32(utils::public_key_to_wallet_address(
+        signature.signer = Some(proto::u256_to_bytes32(utils::public_key_to_wallet_address(
             public_key2,
         )));
         assert!(!KeyManager::verify_signed_message(&any, &signature).is_ok());
@@ -512,7 +512,7 @@ mod tests {
         let (secret_key1, _, _) = utils::testing_keys1();
         let key_manager = KeyManager::new(secret_key1);
         let (_, public_key2, _) = utils::testing_keys2();
-        let message = proto::encode_bytes32(U256::from_little_endian(&[
+        let message = proto::u256_to_bytes32(U256::from_little_endian(&[
             1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
             24, 25, 26, 27, 28, 29, 30, 31, 32,
         ]));
@@ -526,7 +526,7 @@ mod tests {
                 ]),
             )
             .unwrap();
-        signature.signer = Some(proto::encode_bytes32(utils::public_key_to_wallet_address(
+        signature.signer = Some(proto::u256_to_bytes32(utils::public_key_to_wallet_address(
             public_key2,
         )));
         assert!(!KeyManager::verify_signed_message(&any, &signature).is_ok());
@@ -536,7 +536,7 @@ mod tests {
     fn test_message_signature_wrong_schema() {
         let (secret_key, _, _) = utils::testing_keys1();
         let key_manager = KeyManager::new(secret_key);
-        let message = proto::encode_bytes32(U256::from_little_endian(&[
+        let message = proto::u256_to_bytes32(U256::from_little_endian(&[
             1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
             24, 25, 26, 27, 28, 29, 30, 31, 32,
         ]));

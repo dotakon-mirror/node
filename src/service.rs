@@ -42,7 +42,7 @@ impl NodeService {
     ) -> dotakon::node_identity::Payload {
         dotakon::node_identity::Payload {
             protocol_version: Some(Self::get_protocol_version()),
-            wallet_address: Some(proto::encode_bytes32(key_manager.wallet_address())),
+            wallet_address: Some(proto::u256_to_bytes32(key_manager.wallet_address())),
             location: Some(location),
             network_address: Some(public_address.to_owned()),
             grpc_port: Some(port.into()),
@@ -143,7 +143,7 @@ impl NodeServiceV1 for NodeService {
         let request = request.get_ref();
         match request.account_address {
             Some(account_address) => {
-                let account_address = proto::decode_bytes32(&account_address);
+                let account_address = proto::u256_from_bytes32(&account_address);
                 match request.block_number {
                     Some(block_number) => {
                         let balance = self
@@ -152,14 +152,14 @@ impl NodeServiceV1 for NodeService {
                             .map_err(|_| Status::invalid_argument("invalid block number"))?;
                         Ok(Response::new(dotakon::GetAccountBalanceResponse {
                             block_number: Some(block_number),
-                            balance: Some(proto::encode_bytes32(balance)),
+                            balance: Some(proto::u256_to_bytes32(balance)),
                         }))
                     }
                     None => {
                         let (version, balance) = self.db.get_latest_balance(account_address);
                         Ok(Response::new(dotakon::GetAccountBalanceResponse {
                             block_number: Some(version as u64),
-                            balance: Some(proto::encode_bytes32(balance)),
+                            balance: Some(proto::u256_to_bytes32(balance)),
                         }))
                     }
                 }
@@ -311,7 +311,7 @@ mod tests {
         assert_eq!(protocol_version.build.unwrap(), 0);
 
         assert_eq!(
-            proto::decode_bytes32(&payload.wallet_address.unwrap()),
+            proto::u256_from_bytes32(&payload.wallet_address.unwrap()),
             fixture.server_key_manager.wallet_address()
         );
 
@@ -331,7 +331,7 @@ mod tests {
         let response = client
             .get_account_balance(dotakon::GetAccountBalanceRequest {
                 block_number: Some(0),
-                account_address: Some(proto::encode_bytes32(utils::public_key_to_wallet_address(
+                account_address: Some(proto::u256_to_bytes32(utils::public_key_to_wallet_address(
                     public_key,
                 ))),
             })
@@ -340,7 +340,7 @@ mod tests {
         let response = response.get_ref();
         assert_eq!(response.block_number.unwrap(), 0);
         assert_eq!(
-            proto::decode_bytes32(&response.balance.unwrap()),
+            proto::u256_from_bytes32(&response.balance.unwrap()),
             U256::zero()
         );
     }
@@ -353,7 +353,7 @@ mod tests {
         let response = client
             .get_account_balance(dotakon::GetAccountBalanceRequest {
                 block_number: None,
-                account_address: Some(proto::encode_bytes32(utils::public_key_to_wallet_address(
+                account_address: Some(proto::u256_to_bytes32(utils::public_key_to_wallet_address(
                     public_key,
                 ))),
             })
@@ -362,7 +362,7 @@ mod tests {
         let response = response.get_ref();
         assert_eq!(response.block_number.unwrap(), 0);
         assert_eq!(
-            proto::decode_bytes32(&response.balance.unwrap()),
+            proto::u256_from_bytes32(&response.balance.unwrap()),
             U256::zero()
         );
     }
@@ -408,7 +408,7 @@ mod tests {
             client
                 .get_account_balance(dotakon::GetAccountBalanceRequest {
                     block_number: Some(42),
-                    account_address: Some(proto::encode_bytes32(
+                    account_address: Some(proto::u256_to_bytes32(
                         utils::public_key_to_wallet_address(public_key,)
                     )),
                 })

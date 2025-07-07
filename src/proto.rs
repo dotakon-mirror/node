@@ -1,5 +1,6 @@
 use crate::dotakon;
 use anyhow::Result;
+use primitive_types::H256;
 use primitive_types::U256;
 use prost;
 
@@ -15,7 +16,7 @@ impl prost::Name for dotakon::node_identity::Payload {
     const PACKAGE: &'static str = "dotakon";
 }
 
-pub fn encode_bytes32(value: U256) -> dotakon::Bytes32 {
+pub fn u256_to_bytes32(value: U256) -> dotakon::Bytes32 {
     let word_vec: Vec<u64> = value
         .to_little_endian()
         .chunks(8)
@@ -35,13 +36,42 @@ pub fn encode_bytes32(value: U256) -> dotakon::Bytes32 {
     }
 }
 
-pub fn decode_bytes32(proto: &dotakon::Bytes32) -> U256 {
+pub fn u256_from_bytes32(proto: &dotakon::Bytes32) -> U256 {
     let mut bytes = [0u8; 32];
     bytes[0..8].copy_from_slice(&proto.w1.to_le_bytes());
     bytes[8..16].copy_from_slice(&proto.w2.to_le_bytes());
     bytes[16..24].copy_from_slice(&proto.w3.to_le_bytes());
     bytes[24..32].copy_from_slice(&proto.w4.to_le_bytes());
     U256::from_little_endian(&bytes)
+}
+
+pub fn h256_to_bytes32(value: H256) -> dotakon::Bytes32 {
+    let word_vec: Vec<u64> = value
+        .to_fixed_bytes()
+        .chunks(8)
+        .map(|chunk| {
+            let mut bytes = [0u8; 8];
+            bytes.copy_from_slice(chunk);
+            u64::from_le_bytes(bytes)
+        })
+        .collect();
+    let mut words = [0u64; 4];
+    words.copy_from_slice(word_vec.as_slice());
+    dotakon::Bytes32 {
+        w1: words[0],
+        w2: words[1],
+        w3: words[2],
+        w4: words[3],
+    }
+}
+
+pub fn h256_from_bytes32(proto: &dotakon::Bytes32) -> H256 {
+    let mut bytes = [0u8; 32];
+    bytes[0..8].copy_from_slice(&proto.w1.to_le_bytes());
+    bytes[8..16].copy_from_slice(&proto.w2.to_le_bytes());
+    bytes[16..24].copy_from_slice(&proto.w3.to_le_bytes());
+    bytes[24..32].copy_from_slice(&proto.w4.to_le_bytes());
+    H256::from_slice(&bytes)
 }
 
 fn encode_varint(buffer: &mut Vec<u8>, mut value: usize) {
@@ -74,26 +104,49 @@ mod tests {
     use prost::Message;
 
     #[test]
-    fn test_encode_bytes32() {
+    fn test_u256_to_bytes32() {
         let value = U256::from_little_endian(&[
             1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
             24, 25, 26, 27, 28, 29, 30, 31, 32,
         ]);
-        let bytes32 = encode_bytes32(value);
+        let bytes32 = u256_to_bytes32(value);
         assert_eq!(bytes32.w1, 0x0807060504030201u64);
         assert_eq!(bytes32.w2, 0x100F0E0D0C0B0A09u64);
         assert_eq!(bytes32.w3, 0x1817161514131211u64);
         assert_eq!(bytes32.w4, 0x201F1E1D1C1B1A19u64);
-        assert_eq!(value, decode_bytes32(&bytes32));
+        assert_eq!(value, u256_from_bytes32(&bytes32));
     }
 
     #[test]
-    fn test_decode_bytes32() {
+    fn test_u256_from_bytes32() {
         let value = U256::from_little_endian(&[
             1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
             24, 25, 26, 27, 28, 29, 30, 31, 32,
         ]);
-        assert_eq!(value, decode_bytes32(&encode_bytes32(value)));
+        assert_eq!(value, u256_from_bytes32(&u256_to_bytes32(value)));
+    }
+
+    #[test]
+    fn test_h256_to_bytes32() {
+        let value = H256::from_slice(&[
+            1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+            24, 25, 26, 27, 28, 29, 30, 31, 32,
+        ]);
+        let bytes32 = h256_to_bytes32(value);
+        assert_eq!(bytes32.w1, 0x0807060504030201u64);
+        assert_eq!(bytes32.w2, 0x100F0E0D0C0B0A09u64);
+        assert_eq!(bytes32.w3, 0x1817161514131211u64);
+        assert_eq!(bytes32.w4, 0x201F1E1D1C1B1A19u64);
+        assert_eq!(value, h256_from_bytes32(&bytes32));
+    }
+
+    #[test]
+    fn test_h256_from_bytes32() {
+        let value = H256::from_slice(&[
+            1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+            24, 25, 26, 27, 28, 29, 30, 31, 32,
+        ]);
+        assert_eq!(value, h256_from_bytes32(&h256_to_bytes32(value)));
     }
 
     #[test]
@@ -102,9 +155,9 @@ mod tests {
             1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
             24, 25, 26, 27, 28, 29, 30, 31, 32,
         ]);
-        let bytes = encode_any_canonical(&encode_bytes32(value)).unwrap();
+        let bytes = encode_any_canonical(&u256_to_bytes32(value)).unwrap();
         let any = prost_types::Any::decode(bytes.as_slice()).unwrap();
         let decoded = any.to_msg::<dotakon::Bytes32>().unwrap();
-        assert_eq!(value, decode_bytes32(&decoded));
+        assert_eq!(value, u256_from_bytes32(&decoded));
     }
 }
