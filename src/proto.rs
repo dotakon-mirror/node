@@ -11,6 +11,16 @@ impl prost::Name for dotakon::Bytes32 {
     const PACKAGE: &'static str = "dotakon";
 }
 
+impl prost::Name for dotakon::BlockDescriptor {
+    const NAME: &'static str = "BlockDescriptor";
+    const PACKAGE: &'static str = "dotakon";
+}
+
+impl prost::Name for dotakon::MerkleProof {
+    const NAME: &'static str = "MerkleProof";
+    const PACKAGE: &'static str = "dotakon";
+}
+
 impl prost::Name for dotakon::node_identity::Payload {
     const NAME: &'static str = "NodeIdentity.Payload";
     const PACKAGE: &'static str = "dotakon";
@@ -82,8 +92,7 @@ fn encode_varint(buffer: &mut Vec<u8>, mut value: usize) {
     buffer.push((value & 0x7F) as u8);
 }
 
-pub fn encode_any_canonical<M: prost::Message + prost::Name>(message: &M) -> Result<Vec<u8>> {
-    let any = prost_types::Any::from_msg(message)?;
+pub fn encode_any_canonical(any: &prost_types::Any) -> Vec<u8> {
     let type_url_bytes = any.type_url.as_bytes();
     let value_bytes = any.value.as_slice();
     let mut buffer = Vec::<u8>::with_capacity(
@@ -95,7 +104,15 @@ pub fn encode_any_canonical<M: prost::Message + prost::Name>(message: &M) -> Res
     buffer.push(18);
     encode_varint(&mut buffer, value_bytes.len());
     buffer.extend_from_slice(value_bytes);
-    Ok(buffer)
+    buffer
+}
+
+pub fn encode_message_canonical<M: prost::Message + prost::Name>(
+    message: &M,
+) -> Result<(prost_types::Any, Vec<u8>)> {
+    let any = prost_types::Any::from_msg(message)?;
+    let buffer = encode_any_canonical(&any);
+    Ok((any, buffer))
 }
 
 #[cfg(test)]
@@ -155,8 +172,21 @@ mod tests {
             1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
             24, 25, 26, 27, 28, 29, 30, 31, 32,
         ]);
-        let bytes = encode_any_canonical(&u256_to_bytes32(value)).unwrap();
-        let any = prost_types::Any::decode(bytes.as_slice()).unwrap();
+        let any = prost_types::Any::from_msg(&u256_to_bytes32(value)).unwrap();
+        let bytes = encode_any_canonical(&any);
+        assert_eq!(prost_types::Any::decode(bytes.as_slice()).unwrap(), any);
+        let decoded = any.to_msg::<dotakon::Bytes32>().unwrap();
+        assert_eq!(value, u256_from_bytes32(&decoded));
+    }
+
+    #[test]
+    fn test_encode_message_canonical() {
+        let value = U256::from_little_endian(&[
+            1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+            24, 25, 26, 27, 28, 29, 30, 31, 32,
+        ]);
+        let (any, bytes) = encode_message_canonical(&u256_to_bytes32(value)).unwrap();
+        assert_eq!(prost_types::Any::decode(bytes.as_slice()).unwrap(), any);
         let decoded = any.to_msg::<dotakon::Bytes32>().unwrap();
         assert_eq!(value, u256_from_bytes32(&decoded));
     }

@@ -1,5 +1,4 @@
 use crate::dotakon::{self, node_service_v1_server::NodeServiceV1};
-use std::option::Option;
 use std::pin::Pin;
 use tokio_stream::Stream;
 use tonic::{Request, Response, Status, Streaming};
@@ -15,8 +14,18 @@ impl NodeServiceV1 for FakeNodeService {
         _request: Request<dotakon::GetIdentityRequest>,
     ) -> Result<Response<dotakon::NodeIdentity>, Status> {
         Ok(Response::new(dotakon::NodeIdentity {
-            payload: Option::None,
-            signature: Option::None,
+            payload: None,
+            signature: None,
+        }))
+    }
+
+    async fn get_block(
+        &self,
+        _request: Request<dotakon::GetBlockRequest>,
+    ) -> Result<Response<dotakon::GetBlockResponse>, Status> {
+        Ok(Response::new(dotakon::GetBlockResponse {
+            payload: None,
+            signature: None,
         }))
     }
 
@@ -32,8 +41,8 @@ impl NodeServiceV1 for FakeNodeService {
         _request: Request<dotakon::GetAccountBalanceRequest>,
     ) -> Result<Response<dotakon::GetAccountBalanceResponse>, Status> {
         Ok(Response::new(dotakon::GetAccountBalanceResponse {
-            block_number: Option::None,
-            balance: Option::None,
+            payload: None,
+            signature: None,
         }))
     }
 

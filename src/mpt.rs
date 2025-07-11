@@ -1,3 +1,5 @@
+use crate::dotakon;
+use crate::proto;
 use anyhow::{Context, Result, anyhow};
 use primitive_types::H256;
 use sha3::{self, Digest};
@@ -10,6 +12,11 @@ const KEY_CHARACTERS: [char; 16] = [
 
 pub trait Sha3Hash {
     fn sha3_hash(&self) -> H256;
+}
+
+pub trait Proto: Sized {
+    fn encode(&self) -> Result<prost_types::Any>;
+    fn decode(proto: &prost_types::Any) -> Result<Self>;
 }
 
 fn hash_flat_node(children: &BTreeMap<String, H256>) -> H256 {
@@ -329,6 +336,80 @@ impl<V: Sha3Hash, const KL: usize> Proof<V, KL> {
     }
 }
 
+impl<V: Sha3Hash + Proto, const KL: usize> Proof<V, KL> {
+    /// Encodes this proof into a `MerkleProof` protobuf. Note that the block descriptor must be
+    /// provided by the caller.
+    pub fn encode(
+        &self,
+        block_descriptor: dotakon::BlockDescriptor,
+    ) -> Result<dotakon::MerkleProof> {
+        Ok(dotakon::MerkleProof {
+            block_descriptor: Some(block_descriptor),
+            key: Some(self.key.clone()),
+            value: match &self.value {
+                Some(value) => Some(value.encode()?),
+                None => None,
+            },
+            node: self
+                .path
+                .iter()
+                .map(|children| dotakon::merkle_proof::Node {
+                    children: children
+                        .iter()
+                        .map(|(label, hash)| (label.clone(), proto::h256_to_bytes32(*hash)))
+                        .collect(),
+                    hash: Some(proto::h256_to_bytes32(hash_flat_node(&children))),
+                })
+                .collect(),
+        })
+    }
+
+    /// Decodes a Merkle proof from the provided protobuf. The `block_descriptor` is ignored. The
+    /// resulting proof is not verified (use `decode_and_verify` to decode and verify it).
+    pub fn decode(proto: &dotakon::MerkleProof) -> Result<Self> {
+        if proto.key.is_none() {
+            return Err(anyhow!("invalid Merkle proof: the key is missing"));
+        }
+        let key = proto.key.as_ref().unwrap().clone();
+        let value = match &proto.value {
+            Some(value) => Some(V::decode(value)?),
+            None => None,
+        };
+        let path = proto
+            .node
+            .iter()
+            .map(|node| {
+                let children = node
+                    .children
+                    .iter()
+                    .map(|(label, hash)| (label.clone(), proto::h256_from_bytes32(hash)))
+                    .collect::<BTreeMap<String, H256>>();
+                if node.hash.is_none() {
+                    return Err(anyhow!("invalid Merkle proof: missing node hash"));
+                }
+                let hash = proto::h256_from_bytes32(&node.hash.unwrap());
+                if hash != hash_flat_node(&children) {
+                    return Err(anyhow!("invalid Merkle proof: hash mismatch"));
+                }
+                Ok(children)
+            })
+            .collect::<Result<Vec<BTreeMap<String, H256>>>>()?;
+        Self::new(key, value, path)
+    }
+
+    /// Like `decode` but also validates the decoded proof against the provided root hash.
+    ///
+    /// Note that the root hash should be the same as one of the root hashes specified in the block
+    /// descriptor, depending on what storage component this proof is relative to. For example, if
+    /// the proof was generated from an account balance lookup the root hash must be the same as the
+    /// one encoded in `block_descriptor.account_balances_root_hash`.
+    pub fn decode_and_verify(proto: &dotakon::MerkleProof, root_hash: H256) -> Result<Self> {
+        let proof = Self::decode(proto)?;
+        proof.verify(root_hash)?;
+        Ok(proof)
+    }
+}
+
 #[derive(Debug, Clone)]
 struct MptState<V: Clone + Sha3Hash, const KL: usize> {
     values: ValueTrie<V>,
@@ -367,6 +448,14 @@ impl<V: Clone + Sha3Hash, const KL: usize> MptState<V, KL> {
     }
 
     fn put(&mut self, key: &str, value: V, version: u64) -> Result<()> {
+        let latest_version = self.latest_version();
+        if version < latest_version {
+            return Err(anyhow!(
+                "cannot modify past version {} (latest is {})",
+                version,
+                latest_version
+            ));
+        }
         let hash = value.sha3_hash();
         if let Some(hashes) = self.hashes.get_mut(&version) {
             hashes.put(key, hash)?;
@@ -447,6 +536,7 @@ impl<V: Clone + Sha3Hash, const KL: usize> Default for MPT<V, KL> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proto;
     use primitive_types::U256;
 
     const TEST_KEY_LENGTH: usize = 32;
@@ -461,6 +551,20 @@ mod tests {
             let mut hasher = sha3::Sha3_256::new();
             hasher.update(self.inner.to_little_endian());
             H256::from_slice(hasher.finalize().as_slice())
+        }
+    }
+
+    impl Proto for TestValue {
+        fn encode(&self) -> Result<prost_types::Any> {
+            Ok(prost_types::Any::from_msg(&proto::u256_to_bytes32(
+                self.inner,
+            ))?)
+        }
+
+        fn decode(proto: &prost_types::Any) -> Result<Self> {
+            Ok(Self {
+                inner: proto::u256_from_bytes32(&proto.to_msg()?),
+            })
         }
     }
 
@@ -947,5 +1051,187 @@ mod tests {
         assert!(proof22.verify(mpt.root_hash(1)).is_err());
         assert!(proof22.verify(mpt.root_hash(2)).is_ok());
         assert_eq!(mpt.get_proof(&key2, 1).unwrap(), proof21);
+    }
+
+    #[test]
+    fn test_transcode_proof() {
+        let mpt = MPT::<TestValue, TEST_KEY_LENGTH>::new();
+        let key1 = test_key1();
+        let key2 = test_key2();
+        let key3 = test_key3();
+        let value1 = test_value2();
+        let value2 = test_value3();
+        let value3 = test_value1();
+        assert!(mpt.put(&key1, value1.clone(), 0).is_ok());
+        assert!(mpt.put(&key2, value2.clone(), 0).is_ok());
+        assert!(mpt.put(&key3, value3.clone(), 0).is_ok());
+        let proof = mpt.get_proof(&key2, 0).unwrap();
+        let proto = proof
+            .encode(dotakon::BlockDescriptor {
+                block_hash: None,
+                block_number: None,
+                previous_block_hash: None,
+                account_balances_root_hash: Some(proto::h256_to_bytes32(mpt.root_hash(0))),
+            })
+            .unwrap();
+        assert_eq!(
+            Proof::<TestValue, TEST_KEY_LENGTH>::decode(&proto).unwrap(),
+            proof
+        );
+    }
+
+    #[test]
+    fn test_decode_and_verify_proof() {
+        let mpt = MPT::<TestValue, TEST_KEY_LENGTH>::new();
+        let key1 = test_key1();
+        let key2 = test_key2();
+        let key3 = test_key3();
+        let value1 = test_value2();
+        let value2 = test_value3();
+        let value3 = test_value1();
+        assert!(mpt.put(&key1, value1.clone(), 0).is_ok());
+        assert!(mpt.put(&key2, value2.clone(), 0).is_ok());
+        assert!(mpt.put(&key3, value3.clone(), 0).is_ok());
+        let proof = mpt.get_proof(&key2, 0).unwrap();
+        let proto = proof
+            .encode(dotakon::BlockDescriptor {
+                block_hash: None,
+                block_number: None,
+                previous_block_hash: None,
+                account_balances_root_hash: Some(proto::h256_to_bytes32(mpt.root_hash(0))),
+            })
+            .unwrap();
+        assert_eq!(
+            Proof::<TestValue, TEST_KEY_LENGTH>::decode_and_verify(&proto, mpt.root_hash(0))
+                .unwrap(),
+            proof
+        );
+    }
+
+    #[test]
+    fn test_decode_sabotaged_proof() {
+        let mpt = MPT::<TestValue, TEST_KEY_LENGTH>::new();
+        let key1 = test_key1();
+        let key2 = test_key2();
+        let key3 = test_key3();
+        let value1 = test_value2();
+        let value2 = test_value3();
+        let value3 = test_value1();
+        assert!(mpt.put(&key1, value1.clone(), 0).is_ok());
+        assert!(mpt.put(&key2, value2.clone(), 0).is_ok());
+        assert!(mpt.put(&key3, value3.clone(), 0).is_ok());
+        let proof = mpt.get_proof(&key2, 0).unwrap();
+        let mut proto = proof
+            .encode(dotakon::BlockDescriptor {
+                block_hash: None,
+                block_number: None,
+                previous_block_hash: None,
+                account_balances_root_hash: Some(proto::h256_to_bytes32(mpt.root_hash(0))),
+            })
+            .unwrap();
+        proto.node[0].hash = Some(proto::h256_to_bytes32(H256::zero()));
+        assert!(
+            Proof::<TestValue, TEST_KEY_LENGTH>::decode_and_verify(&proto, mpt.root_hash(0))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn test_decode_and_verify_sabotaged_proof() {
+        let mpt = MPT::<TestValue, TEST_KEY_LENGTH>::new();
+        let key1 = test_key1();
+        let key2 = test_key2();
+        let key3 = test_key3();
+        let value1 = test_value2();
+        let value2 = test_value3();
+        let value3 = test_value1();
+        assert!(mpt.put(&key1, value1.clone(), 0).is_ok());
+        assert!(mpt.put(&key2, value2.clone(), 0).is_ok());
+        assert!(mpt.put(&key3, value3.clone(), 0).is_ok());
+        let proof = mpt.get_proof(&key2, 0).unwrap();
+        let mut proto = proof
+            .encode(dotakon::BlockDescriptor {
+                block_hash: None,
+                block_number: None,
+                previous_block_hash: None,
+                account_balances_root_hash: Some(proto::h256_to_bytes32(mpt.root_hash(0))),
+            })
+            .unwrap();
+        proto.node[0].hash = Some(proto::h256_to_bytes32(H256::zero()));
+        assert!(
+            Proof::<TestValue, TEST_KEY_LENGTH>::decode_and_verify(&proto, mpt.root_hash(0))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn test_decode_wrong_proof() {
+        let mpt = MPT::<TestValue, TEST_KEY_LENGTH>::new();
+        let key1 = test_key1();
+        let key2 = test_key2();
+        let key3 = test_key3();
+        let value1 = test_value2();
+        let value2 = test_value3();
+        let value3 = test_value1();
+        assert!(mpt.put(&key1, value1.clone(), 0).is_ok());
+        assert!(mpt.put(&key2, value2.clone(), 0).is_ok());
+        assert!(mpt.put(&key3, value3.clone(), 0).is_ok());
+        let proof = mpt.get_proof(&key2, 0).unwrap();
+        let mut proto = proof
+            .encode(dotakon::BlockDescriptor {
+                block_hash: None,
+                block_number: None,
+                previous_block_hash: None,
+                account_balances_root_hash: Some(proto::h256_to_bytes32(mpt.root_hash(0))),
+            })
+            .unwrap();
+        proto.value = None;
+        assert!(Proof::<TestValue, TEST_KEY_LENGTH>::decode(&proto).is_ok());
+    }
+
+    #[test]
+    fn test_decode_and_verify_wrong_proof() {
+        let mpt = MPT::<TestValue, TEST_KEY_LENGTH>::new();
+        let key1 = test_key1();
+        let key2 = test_key2();
+        let key3 = test_key3();
+        let value1 = test_value2();
+        let value2 = test_value3();
+        let value3 = test_value1();
+        assert!(mpt.put(&key1, value1.clone(), 0).is_ok());
+        assert!(mpt.put(&key2, value2.clone(), 0).is_ok());
+        assert!(mpt.put(&key3, value3.clone(), 0).is_ok());
+        let proof = mpt.get_proof(&key2, 0).unwrap();
+        let mut proto = proof
+            .encode(dotakon::BlockDescriptor {
+                block_hash: None,
+                block_number: None,
+                previous_block_hash: None,
+                account_balances_root_hash: Some(proto::h256_to_bytes32(mpt.root_hash(0))),
+            })
+            .unwrap();
+        proto.value = None;
+        assert!(
+            Proof::<TestValue, TEST_KEY_LENGTH>::decode_and_verify(&proto, mpt.root_hash(0))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn test_past_modification() {
+        let mpt = MPT::<TestValue, TEST_KEY_LENGTH>::new();
+        let key1 = test_key1();
+        let key2 = test_key2();
+        let key3 = test_key3();
+        let value1 = test_value2();
+        let value2 = test_value3();
+        let value3 = test_value1();
+        assert!(mpt.put(&key1, value1.clone(), 0).is_ok());
+        assert!(mpt.put(&key2, value2.clone(), 1).is_ok());
+        assert!(mpt.put(&key1, value3.clone(), 0).is_err());
+        assert!(mpt.put(&key3, value3.clone(), 0).is_err());
+        assert_eq!(mpt.get(&key1, 2).unwrap(), value1);
+        assert_eq!(mpt.get(&key2, 2).unwrap(), value2);
+        assert!(mpt.get(&key3, 2).is_none());
     }
 }

@@ -157,19 +157,22 @@ impl KeyManager {
         &self,
         message: &M,
         secret_nonce: U256,
-    ) -> Result<dotakon::Signature> {
-        let bytes = proto::encode_any_canonical(message)?;
+    ) -> Result<(prost_types::Any, dotakon::Signature)> {
+        let (payload, bytes) = proto::encode_message_canonical(message)?;
         let signature = self.sign(bytes.as_slice(), secret_nonce).encode();
-        Ok(dotakon::Signature {
-            signer: Some(proto::u256_to_bytes32(self.wallet_address())),
-            scheme: Some(dotakon::SignatureScheme::SchnorrPallasSha3256.into()),
-            public_key: Some(self.public_key_pallas.to_big_endian().to_vec()),
-            signature: Some(signature),
-        })
+        Ok((
+            payload,
+            dotakon::Signature {
+                signer: Some(proto::u256_to_bytes32(self.wallet_address())),
+                scheme: Some(dotakon::SignatureScheme::SchnorrPallasSha3256.into()),
+                public_key: Some(self.public_key_pallas.to_big_endian().to_vec()),
+                signature: Some(signature),
+            },
+        ))
     }
 
-    pub fn verify_signed_message<M: prost::Message + prost::Name>(
-        message: &M,
+    pub fn verify_signed_message(
+        payload: &prost_types::Any,
         signature: &dotakon::Signature,
     ) -> Result<()> {
         const SCHNORR_PALLAS_SHA3_256: i32 = dotakon::SignatureScheme::SchnorrPallasSha3256 as i32;
@@ -206,7 +209,7 @@ impl KeyManager {
             }
             None => Err(anyhow!("invalid signature: missing signature bytes")),
         }?;
-        let message_bytes = proto::encode_any_canonical(message)?;
+        let message_bytes = proto::encode_any_canonical(&payload);
         Self::verify(message_bytes.as_slice(), &public_key, &signature)
     }
 
@@ -430,10 +433,9 @@ mod tests {
             1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
             24, 25, 26, 27, 28, 29, 30, 31, 32,
         ]));
-        let any = prost_types::Any::from_msg(&message).unwrap();
-        let signature = key_manager
+        let (any, signature) = key_manager
             .sign_message(
-                &any,
+                &message,
                 U256::from_little_endian(&[
                     32u8, 31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14,
                     13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1,
@@ -463,10 +465,9 @@ mod tests {
             1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
             24, 25, 26, 27, 28, 29, 30, 31, 32,
         ]));
-        let any1 = prost_types::Any::from_msg(&message1).unwrap();
-        let signature = key_manager
+        let (_, signature) = key_manager
             .sign_message(
-                &any1,
+                &message1,
                 U256::from_little_endian(&[
                     32u8, 31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14,
                     13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1,
@@ -490,10 +491,9 @@ mod tests {
             1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
             24, 25, 26, 27, 28, 29, 30, 31, 32,
         ]));
-        let any = prost_types::Any::from_msg(&message).unwrap();
-        let mut signature = key_manager
+        let (any, mut signature) = key_manager
             .sign_message(
-                &any,
+                &message,
                 U256::from_little_endian(&[
                     32u8, 31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14,
                     13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1,
@@ -516,10 +516,9 @@ mod tests {
             1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
             24, 25, 26, 27, 28, 29, 30, 31, 32,
         ]));
-        let any = prost_types::Any::from_msg(&message).unwrap();
-        let mut signature = key_manager
+        let (any, mut signature) = key_manager
             .sign_message(
-                &any,
+                &message,
                 U256::from_little_endian(&[
                     32u8, 31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14,
                     13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1,
@@ -540,10 +539,9 @@ mod tests {
             1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
             24, 25, 26, 27, 28, 29, 30, 31, 32,
         ]));
-        let any = prost_types::Any::from_msg(&message).unwrap();
-        let mut signature = key_manager
+        let (any, mut signature) = key_manager
             .sign_message(
-                &any,
+                &message,
                 U256::from_little_endian(&[
                     32u8, 31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14,
                     13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1,
