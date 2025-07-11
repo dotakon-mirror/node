@@ -755,6 +755,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_missing_client_certificate() {
+        let nonce = U256::from_little_endian(&[
+            1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+            24, 25, 26, 27, 28, 29, 30, 0, 0,
+        ]);
+
+        let (server_secret_key, _, _) = utils::testing_keys1();
+        let server_key_manager = Arc::new(keys::KeyManager::new(server_secret_key));
+        let server_certificate = Arc::new(
+            ssl::generate_certificate(server_key_manager.clone(), "server".to_string(), nonce)
+                .unwrap(),
+        );
+
+        let service = NodeServiceV1Server::with_interceptor(
+            FakeNodeService {},
+            move |request: Request<()>| {
+                assert!(request.extensions().get::<ConnectionInfo>().is_none());
+                Ok(request)
+            },
+        );
+
+        let listener = Arc::new(TcpListenerAdapter::new("localhost:0").await.unwrap());
+        let server_listener = listener.clone();
+
+        let server_ready = Arc::new(Notify::new());
+        let start_client = server_ready.clone();
+        let server = tokio::task::spawn(async move {
+            let future = Server::builder().add_service(service).serve_with_incoming(
+                IncomingWithMTls::new(server_listener, server_key_manager, server_certificate)
+                    .await
+                    .unwrap(),
+            );
+            server_ready.notify_one();
+            let _ = future.await;
+        });
+        start_client.notified().await;
+
+        assert!(
+            async {
+                let channel = Channel::builder(
+                    format!(
+                        "http://localhost:{}",
+                        listener.local_address().unwrap().port()
+                    )
+                    .parse()
+                    .unwrap(),
+                )
+                .connect()
+                .await?;
+                let mut client = NodeServiceV1Client::new(channel);
+                client
+                    .get_identity(dotakon::GetIdentityRequest::default())
+                    .await?;
+                Ok::<(), anyhow::Error>(())
+            }
+            .await
+            .is_err()
+        );
+
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn test_mock_connection() {
         let nonce = U256::from_little_endian(&[
             1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
