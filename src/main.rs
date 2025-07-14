@@ -13,6 +13,7 @@ mod net;
 mod proto;
 mod service;
 mod ssl;
+mod topology;
 mod utils;
 
 #[cfg(test)]
@@ -44,7 +45,11 @@ struct Args {
 
     /// The TCP port where the gRPC service is exposed.
     #[arg(long)]
-    port: u16,
+    grpc_port: u16,
+
+    /// The TCP port where the gRPC-web service is exposed.
+    #[arg(long)]
+    http_port: u16,
 
     /// The latitude of the self-declared geographical location of the node, expressed in degrees
     /// between -90.0 and +90.0.
@@ -106,10 +111,11 @@ async fn main() -> Result<()> {
             key_manager.clone(),
             location,
             args.public_address.as_str(),
-            args.port,
-        )));
+            args.grpc_port,
+            args.http_port,
+        )?));
 
-    let local_address = format!("{}:{}", args.local_address, args.port);
+    let local_address = format!("{}:{}", args.local_address, args.grpc_port);
     println!("listening on {}", local_address);
 
     server

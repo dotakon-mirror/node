@@ -1071,7 +1071,9 @@ mod tests {
                 block_hash: None,
                 block_number: None,
                 previous_block_hash: None,
+                network_topology_root_hash: None,
                 account_balances_root_hash: Some(proto::h256_to_bytes32(mpt.root_hash(0))),
+                program_storage_root_hash: None,
             })
             .unwrap();
         assert_eq!(
@@ -1098,7 +1100,9 @@ mod tests {
                 block_hash: None,
                 block_number: None,
                 previous_block_hash: None,
+                network_topology_root_hash: None,
                 account_balances_root_hash: Some(proto::h256_to_bytes32(mpt.root_hash(0))),
+                program_storage_root_hash: None,
             })
             .unwrap();
         assert_eq!(
@@ -1126,7 +1130,9 @@ mod tests {
                 block_hash: None,
                 block_number: None,
                 previous_block_hash: None,
+                network_topology_root_hash: None,
                 account_balances_root_hash: Some(proto::h256_to_bytes32(mpt.root_hash(0))),
+                program_storage_root_hash: None,
             })
             .unwrap();
         proto.node[0].hash = Some(proto::h256_to_bytes32(H256::zero()));
@@ -1154,7 +1160,9 @@ mod tests {
                 block_hash: None,
                 block_number: None,
                 previous_block_hash: None,
+                network_topology_root_hash: None,
                 account_balances_root_hash: Some(proto::h256_to_bytes32(mpt.root_hash(0))),
+                program_storage_root_hash: None,
             })
             .unwrap();
         proto.node[0].hash = Some(proto::h256_to_bytes32(H256::zero()));
@@ -1182,7 +1190,9 @@ mod tests {
                 block_hash: None,
                 block_number: None,
                 previous_block_hash: None,
+                network_topology_root_hash: None,
                 account_balances_root_hash: Some(proto::h256_to_bytes32(mpt.root_hash(0))),
+                program_storage_root_hash: None,
             })
             .unwrap();
         proto.value = None;
@@ -1207,7 +1217,9 @@ mod tests {
                 block_hash: None,
                 block_number: None,
                 previous_block_hash: None,
+                network_topology_root_hash: None,
                 account_balances_root_hash: Some(proto::h256_to_bytes32(mpt.root_hash(0))),
+                program_storage_root_hash: None,
             })
             .unwrap();
         proto.value = None;

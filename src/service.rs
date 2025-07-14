@@ -37,15 +37,16 @@ impl NodeService {
         key_manager: &keys::KeyManager,
         location: dotakon::GeographicalLocation,
         public_address: &str,
-        port: u16,
+        grpc_port: u16,
+        http_port: u16,
     ) -> dotakon::node_identity::Payload {
         dotakon::node_identity::Payload {
             protocol_version: Some(Self::get_protocol_version()),
-            wallet_address: Some(proto::u256_to_bytes32(key_manager.wallet_address())),
+            account_address: Some(proto::u256_to_bytes32(key_manager.wallet_address())),
             location: Some(location),
             network_address: Some(public_address.to_owned()),
-            grpc_port: Some(port.into()),
-            http_port: None,
+            grpc_port: Some(grpc_port.into()),
+            http_port: Some(http_port.into()),
             timestamp: Some(prost_types::Timestamp {
                 seconds: SystemTime::now()
                     .duration_since(SystemTime::UNIX_EPOCH)
@@ -60,8 +61,9 @@ impl NodeService {
         key_manager: Arc<keys::KeyManager>,
         location: dotakon::GeographicalLocation,
         public_address: &str,
-        port: u16,
-    ) -> Self {
+        grpc_port: u16,
+        http_port: u16,
+    ) -> anyhow::Result<Self> {
         println!("Public key: {:#x}", key_manager.public_key());
         println!(
             "Public key (Ed25519): {:#x}",
@@ -71,12 +73,23 @@ impl NodeService {
             "Wallet address: {}",
             utils::format_wallet_address(key_manager.wallet_address())
         );
-        let identity = Self::make_node_identity(&*key_manager, location, public_address, port);
-        Self {
+        let identity = Self::make_node_identity(
+            &*key_manager,
+            location,
+            public_address,
+            grpc_port,
+            http_port,
+        );
+        let (identity_payload, identity_signature) =
+            key_manager.sign_message(&identity, get_random())?;
+        Ok(Self {
             key_manager,
             identity,
-            db: db::Db::new(),
-        }
+            db: db::Db::new(dotakon::NodeIdentity {
+                payload: Some(identity_payload),
+                signature: Some(identity_signature),
+            })?,
+        })
     }
 
     fn get_client_public_key<M>(&self, request: &Request<M>) -> anyhow::Result<U256> {
@@ -175,8 +188,14 @@ impl NodeServiceV1 for NodeService {
             block_hash: Some(proto::h256_to_bytes32(block_info.hash())),
             block_number: Some(block_info.number()),
             previous_block_hash: Some(proto::h256_to_bytes32(block_info.previous_block_hash())),
+            network_topology_root_hash: Some(proto::h256_to_bytes32(
+                block_info.network_topology_root_hash(),
+            )),
             account_balances_root_hash: Some(proto::h256_to_bytes32(
                 block_info.account_balances_root_hash(),
+            )),
+            program_storage_root_hash: Some(proto::h256_to_bytes32(
+                block_info.program_storage_root_hash(),
             )),
         };
         let (payload, signature) = self
@@ -268,8 +287,9 @@ mod tests {
                 server_key_manager.clone(),
                 location,
                 "localhost",
+                4443,
                 8080,
-            ));
+            )?);
 
             let (server_stream, client_stream) = tokio::io::duplex(4096);
 
@@ -325,7 +345,7 @@ mod tests {
     }
 
     fn genesis_block_hash() -> H256 {
-        "0x4fd6622a108075aaf8752956401a8680541ce20d8102904a359a7b033fca3df7"
+        "0x83cc1fed8efd953693412822442573294d0b103313c8dc84b45a6cccea68161e"
             .parse()
             .unwrap()
     }
@@ -353,7 +373,7 @@ mod tests {
         assert_eq!(protocol_version.build.unwrap(), 0);
 
         assert_eq!(
-            proto::u256_from_bytes32(&payload.wallet_address.unwrap()),
+            proto::u256_from_bytes32(&payload.account_address.unwrap()),
             fixture.server_key_manager.wallet_address()
         );
 
@@ -362,7 +382,8 @@ mod tests {
         assert_eq!(location.longitude.unwrap(), 104u32);
 
         assert_eq!(payload.network_address.unwrap(), "localhost");
-        assert_eq!(payload.grpc_port.unwrap(), 8080u32);
+        assert_eq!(payload.grpc_port.unwrap(), 4443u32);
+        assert_eq!(payload.http_port.unwrap(), 8080u32);
     }
 
     #[tokio::test]
@@ -397,7 +418,19 @@ mod tests {
             H256::zero()
         );
         assert_eq!(
+            proto::h256_from_bytes32(&payload.network_topology_root_hash.unwrap()),
+            "0x1b46509c58029272b01f5473151dcf8810e24b52f9720c9fe56c9f62a03a8577"
+                .parse()
+                .unwrap()
+        );
+        assert_eq!(
             proto::h256_from_bytes32(&payload.account_balances_root_hash.unwrap()),
+            "0xb4a3716bd9261f312ea71656dda4caa0d694f0f6816712036ee8fce833e4b46f"
+                .parse()
+                .unwrap()
+        );
+        assert_eq!(
+            proto::h256_from_bytes32(&payload.program_storage_root_hash.unwrap()),
             "0xb4a3716bd9261f312ea71656dda4caa0d694f0f6816712036ee8fce833e4b46f"
                 .parse()
                 .unwrap()
@@ -434,7 +467,19 @@ mod tests {
             H256::zero()
         );
         assert_eq!(
+            proto::h256_from_bytes32(&payload.network_topology_root_hash.unwrap()),
+            "0x1b46509c58029272b01f5473151dcf8810e24b52f9720c9fe56c9f62a03a8577"
+                .parse()
+                .unwrap()
+        );
+        assert_eq!(
             proto::h256_from_bytes32(&payload.account_balances_root_hash.unwrap()),
+            "0xb4a3716bd9261f312ea71656dda4caa0d694f0f6816712036ee8fce833e4b46f"
+                .parse()
+                .unwrap()
+        );
+        assert_eq!(
+            proto::h256_from_bytes32(&payload.program_storage_root_hash.unwrap()),
             "0xb4a3716bd9261f312ea71656dda4caa0d694f0f6816712036ee8fce833e4b46f"
                 .parse()
                 .unwrap()
