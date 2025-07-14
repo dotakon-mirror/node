@@ -315,14 +315,14 @@ impl Db {
 
     pub fn get_balance(
         &self,
-        account_address: U256,
+        account_address: H256,
         block_hash: H256,
     ) -> Result<(BlockInfo, AccountBalanceProof)> {
         if let Some(block) = self.get_block_by_hash(block_hash) {
             Ok((
                 *block,
                 self.account_balances
-                    .get_proof(&account_address.to_big_endian(), block.number)?,
+                    .get_proof(&account_address.to_fixed_bytes(), block.number)?,
             ))
         } else {
             Err(anyhow!("block not found"))
@@ -331,13 +331,13 @@ impl Db {
 
     pub fn get_latest_balance(
         &self,
-        account_address: U256,
+        account_address: H256,
     ) -> Result<(BlockInfo, AccountBalanceProof)> {
         let block = self.get_latest_block();
         Ok((
             *block,
             self.account_balances
-                .get_proof(&account_address.to_big_endian(), block.number)?,
+                .get_proof(&account_address.to_fixed_bytes(), block.number)?,
         ))
     }
 }
@@ -358,7 +358,7 @@ mod tests {
                 minor: Some(0),
                 build: Some(0),
             }),
-            account_address: Some(proto::u256_to_bytes32(key_manager.wallet_address())),
+            account_address: Some(proto::h256_to_bytes32(key_manager.wallet_address())),
             location: Some(dotakon::GeographicalLocation {
                 latitude: Some(71),
                 longitude: Some(104),
@@ -384,7 +384,7 @@ mod tests {
     }
 
     fn genesis_block_hash() -> H256 {
-        "0x83cc1fed8efd953693412822442573294d0b103313c8dc84b45a6cccea68161e"
+        "0x205d1806b1778989c9ad3b74eef406aa8dbe265bd56653f8169b3437c56475ae"
             .parse()
             .unwrap()
     }
@@ -501,7 +501,7 @@ mod tests {
         let account_address = utils::public_key_to_wallet_address(public_key);
         let (block, proof) = db.get_latest_balance(account_address).unwrap();
         assert_eq!(block.hash(), genesis_block_hash());
-        assert_eq!(U256::from_big_endian(proof.key()), account_address);
+        assert_eq!(H256::from_slice(proof.key()), account_address);
         assert!(proof.value().is_none());
     }
 
@@ -524,7 +524,7 @@ mod tests {
             .get_balance(account_address, genesis_block_hash())
             .unwrap();
         assert_eq!(block.hash(), genesis_block_hash());
-        assert_eq!(U256::from_big_endian(proof.key()), account_address);
+        assert_eq!(H256::from_slice(proof.key()), account_address);
         assert!(proof.value().is_none());
     }
 

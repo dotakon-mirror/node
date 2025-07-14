@@ -4,7 +4,7 @@ use crate::proto;
 use crate::utils;
 use crate::{keys, net};
 use anyhow::Context;
-use primitive_types::U256;
+use primitive_types::{H256, U256};
 use rand_core::{OsRng, RngCore};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -42,7 +42,7 @@ impl NodeService {
     ) -> dotakon::node_identity::Payload {
         dotakon::node_identity::Payload {
             protocol_version: Some(Self::get_protocol_version()),
-            account_address: Some(proto::u256_to_bytes32(key_manager.wallet_address())),
+            account_address: Some(proto::h256_to_bytes32(key_manager.wallet_address())),
             location: Some(location),
             network_address: Some(public_address.to_owned()),
             grpc_port: Some(grpc_port.into()),
@@ -100,7 +100,7 @@ impl NodeService {
         Ok(info.peer_public_key())
     }
 
-    fn get_client_wallet_address<M>(&self, request: &Request<M>) -> anyhow::Result<U256> {
+    fn get_client_wallet_address<M>(&self, request: &Request<M>) -> anyhow::Result<H256> {
         let info = request
             .extensions()
             .get::<net::ConnectionInfo>()
@@ -140,7 +140,7 @@ impl NodeService {
         &self,
         request: &dotakon::GetAccountBalanceRequest,
     ) -> Result<(db::BlockInfo, db::AccountBalanceProof), Status> {
-        let account_address = proto::u256_from_bytes32(
+        let account_address = proto::h256_from_bytes32(
             &request
                 .account_address
                 .context("missing account address field")
@@ -345,7 +345,7 @@ mod tests {
     }
 
     fn genesis_block_hash() -> H256 {
-        "0x83cc1fed8efd953693412822442573294d0b103313c8dc84b45a6cccea68161e"
+        "0x205d1806b1778989c9ad3b74eef406aa8dbe265bd56653f8169b3437c56475ae"
             .parse()
             .unwrap()
     }
@@ -373,7 +373,7 @@ mod tests {
         assert_eq!(protocol_version.build.unwrap(), 0);
 
         assert_eq!(
-            proto::u256_from_bytes32(&payload.account_address.unwrap()),
+            proto::h256_from_bytes32(&payload.account_address.unwrap()),
             fixture.server_key_manager.wallet_address()
         );
 
@@ -419,7 +419,7 @@ mod tests {
         );
         assert_eq!(
             proto::h256_from_bytes32(&payload.network_topology_root_hash.unwrap()),
-            "0x1b46509c58029272b01f5473151dcf8810e24b52f9720c9fe56c9f62a03a8577"
+            "0xc41ca824ff35b570d239d89799df1d837dcca674c109ff7a13afa73f9a6b20b6"
                 .parse()
                 .unwrap()
         );
@@ -468,7 +468,7 @@ mod tests {
         );
         assert_eq!(
             proto::h256_from_bytes32(&payload.network_topology_root_hash.unwrap()),
-            "0x1b46509c58029272b01f5473151dcf8810e24b52f9720c9fe56c9f62a03a8577"
+            "0xc41ca824ff35b570d239d89799df1d837dcca674c109ff7a13afa73f9a6b20b6"
                 .parse()
                 .unwrap()
         );
@@ -514,7 +514,7 @@ mod tests {
 
         let response = client
             .get_account_balance(dotakon::GetAccountBalanceRequest {
-                account_address: Some(proto::u256_to_bytes32(account_address)),
+                account_address: Some(proto::h256_to_bytes32(account_address)),
                 block_hash: Some(proto::h256_to_bytes32(genesis_block_hash())),
             })
             .await
@@ -538,7 +538,7 @@ mod tests {
             block_info.account_balances_root_hash(),
         )
         .unwrap();
-        assert_eq!(*proof.key(), account_address.to_big_endian());
+        assert_eq!(*proof.key(), account_address.to_fixed_bytes());
         assert!(proof.value().is_none());
     }
 
@@ -552,7 +552,7 @@ mod tests {
 
         let response = client
             .get_account_balance(dotakon::GetAccountBalanceRequest {
-                account_address: Some(proto::u256_to_bytes32(account_address)),
+                account_address: Some(proto::h256_to_bytes32(account_address)),
                 block_hash: None,
             })
             .await
@@ -576,7 +576,7 @@ mod tests {
             block_info.account_balances_root_hash(),
         )
         .unwrap();
-        assert_eq!(*proof.key(), account_address.to_big_endian());
+        assert_eq!(*proof.key(), account_address.to_fixed_bytes());
         assert!(proof.value().is_none());
     }
 

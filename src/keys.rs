@@ -10,7 +10,7 @@ use curve25519_dalek::{
 use ed25519_dalek::{self, ed25519::signature::SignerMut, pkcs8::EncodePrivateKey};
 use ff::PrimeField;
 use pasta_curves::{group::Group, pallas::Point as PointPallas, pallas::Scalar as ScalarPallas};
-use primitive_types::U256;
+use primitive_types::{H256, U256};
 use rcgen;
 use sha3::{self, Digest};
 use std::ops::Deref;
@@ -54,7 +54,7 @@ pub struct KeyManager {
     public_key_pallas: U256,
     public_key_point_25519: Point25519,
     public_key_25519: U256,
-    wallet_address: U256,
+    wallet_address: H256,
 }
 
 impl KeyManager {
@@ -98,7 +98,7 @@ impl KeyManager {
         self.public_key_25519
     }
 
-    pub fn wallet_address(&self) -> U256 {
+    pub fn wallet_address(&self) -> H256 {
         self.wallet_address
     }
 
@@ -163,7 +163,7 @@ impl KeyManager {
         Ok((
             payload,
             dotakon::Signature {
-                signer: Some(proto::u256_to_bytes32(self.wallet_address())),
+                signer: Some(proto::h256_to_bytes32(self.wallet_address())),
                 scheme: Some(dotakon::SignatureScheme::SchnorrPallasSha3256.into()),
                 public_key: Some(self.public_key_pallas.to_big_endian().to_vec()),
                 signature: Some(signature),
@@ -192,7 +192,7 @@ impl KeyManager {
         }?;
         match signature.signer {
             Some(bytes32) => {
-                let signer = proto::u256_from_bytes32(&bytes32);
+                let signer = proto::h256_from_bytes32(&bytes32);
                 if signer != wallet_address {
                     Err(anyhow!("invalid signature: mismatching signer address"))
                 } else {
@@ -501,7 +501,7 @@ mod tests {
             )
             .unwrap();
         signature.public_key = Some(public_key2.to_big_endian().to_vec());
-        signature.signer = Some(proto::u256_to_bytes32(utils::public_key_to_wallet_address(
+        signature.signer = Some(proto::h256_to_bytes32(utils::public_key_to_wallet_address(
             public_key2,
         )));
         assert!(!KeyManager::verify_signed_message(&any, &signature).is_ok());
@@ -525,7 +525,7 @@ mod tests {
                 ]),
             )
             .unwrap();
-        signature.signer = Some(proto::u256_to_bytes32(utils::public_key_to_wallet_address(
+        signature.signer = Some(proto::h256_to_bytes32(utils::public_key_to_wallet_address(
             public_key2,
         )));
         assert!(!KeyManager::verify_signed_message(&any, &signature).is_ok());

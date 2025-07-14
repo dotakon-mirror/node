@@ -1,6 +1,6 @@
 use crate::{dotakon, proto};
 use anyhow::{Context, Result, anyhow};
-use primitive_types::{H256, U256};
+use primitive_types::H256;
 use sha3::{self, Digest};
 use std::collections::BTreeSet;
 
@@ -12,7 +12,7 @@ pub struct Location {
 
 #[derive(Debug, Clone)]
 pub struct Node {
-    account_address: U256,
+    account_address: H256,
     signed_identity: dotakon::NodeIdentity,
     location: Location,
     network_address: String,
@@ -35,7 +35,7 @@ impl Node {
             .as_ref()
             .context("payload missing")?
             .to_msg::<dotakon::node_identity::Payload>()?;
-        let account_address = proto::u256_from_bytes32(
+        let account_address = proto::h256_from_bytes32(
             &payload
                 .account_address
                 .context("account address field missing")?,
@@ -67,12 +67,12 @@ impl Node {
         })
     }
 
-    pub fn account_address(&self) -> U256 {
+    pub fn account_address(&self) -> H256 {
         self.account_address
     }
 
     pub fn hash(&self) -> H256 {
-        H256::from_slice(&self.account_address.to_little_endian())
+        self.account_address
     }
 
     pub fn signed_identity(&self) -> &dotakon::NodeIdentity {
@@ -196,6 +196,7 @@ mod tests {
     use super::*;
     use crate::keys;
     use crate::utils;
+    use primitive_types::U256;
 
     #[test]
     fn test_node() {
@@ -207,7 +208,7 @@ mod tests {
                 minor: Some(0),
                 build: Some(0),
             }),
-            account_address: Some(proto::u256_to_bytes32(key_manager.wallet_address())),
+            account_address: Some(proto::h256_to_bytes32(key_manager.wallet_address())),
             location: Some(dotakon::GeographicalLocation {
                 latitude: Some(71),
                 longitude: Some(104),
@@ -232,10 +233,7 @@ mod tests {
         };
         let node = Node::new(identity.clone()).unwrap();
         assert_eq!(node.account_address(), key_manager.wallet_address());
-        assert_eq!(
-            node.hash(),
-            H256::from_slice(&key_manager.wallet_address().to_little_endian())
-        );
+        assert_eq!(node.hash(), key_manager.wallet_address());
         assert_eq!(*node.signed_identity(), identity);
         assert_eq!(node.location().latitude, 71);
         assert_eq!(node.location().longitude, 104);

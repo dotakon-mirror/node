@@ -4,7 +4,7 @@ use crate::utils;
 use anyhow::{self, Context};
 use futures;
 use hyper::rt::{Read, ReadBufCursor, Write};
-use primitive_types::U256;
+use primitive_types::{H256, U256};
 use rustls::pki_types::ServerName;
 use std::io::{Error, ErrorKind};
 use std::net::SocketAddr;
@@ -53,7 +53,7 @@ impl ConnectionInfo {
         self.peer_public_key
     }
 
-    pub fn peer_wallet_address(&self) -> U256 {
+    pub fn peer_wallet_address(&self) -> H256 {
         utils::public_key_to_wallet_address(self.peer_public_key)
     }
 }

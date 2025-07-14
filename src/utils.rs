@@ -7,7 +7,7 @@ use oid_registry::{Oid, OidEntry, OidRegistry, asn1_rs::oid};
 use pasta_curves::{
     group::GroupEncoding, pallas::Point as PointPallas, pallas::Scalar as ScalarPallas,
 };
-use primitive_types::U256;
+use primitive_types::{H256, U256};
 use sha3::{self, Digest};
 
 pub const OID_DOTAKON_PALLAS_PUBLIC_KEY: Oid<'_> = oid!(1.3.6.1.4.1.71104.1);
@@ -189,13 +189,13 @@ impl DualSchnorrSignature {
 
 /// Converts the (Pallas) public key of an account to the corresponding wallet address. Basically
 /// just a SHA3 hash.
-pub fn public_key_to_wallet_address(public_key: U256) -> U256 {
+pub fn public_key_to_wallet_address(public_key: U256) -> H256 {
     let mut hasher = sha3::Sha3_256::new();
     hasher.update(public_key.to_little_endian());
-    U256::from_big_endian(hasher.finalize().as_slice())
+    H256::from_slice(hasher.finalize().as_slice())
 }
 
-pub fn format_wallet_address(wallet_address: U256) -> String {
+pub fn format_wallet_address(wallet_address: H256) -> String {
     format!("{:#x}", wallet_address)
 }
 
