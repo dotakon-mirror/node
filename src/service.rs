@@ -73,13 +73,8 @@ impl NodeService {
             "Wallet address: {}",
             utils::format_wallet_address(key_manager.wallet_address())
         );
-        let identity = Self::make_node_identity(
-            &*key_manager,
-            location,
-            public_address,
-            grpc_port,
-            http_port,
-        );
+        let identity =
+            Self::make_node_identity(&key_manager, location, public_address, grpc_port, http_port);
         let (identity_payload, identity_signature) =
             key_manager.sign_message(&identity, get_random())?;
         Ok(Self {

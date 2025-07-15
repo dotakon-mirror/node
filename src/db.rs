@@ -163,9 +163,9 @@ impl From<U256> for AccountBalance {
     }
 }
 
-impl Into<U256> for AccountBalance {
-    fn into(self) -> U256 {
-        self.value
+impl From<AccountBalance> for U256 {
+    fn from(balance: AccountBalance) -> Self {
+        balance.value
     }
 }
 
@@ -234,9 +234,9 @@ impl From<u64> for ProgramStorageValue {
     }
 }
 
-impl Into<u64> for ProgramStorageValue {
-    fn into(self) -> u64 {
-        self.value
+impl From<ProgramStorageValue> for u64 {
+    fn from(value: ProgramStorageValue) -> Self {
+        value.value
     }
 }
 

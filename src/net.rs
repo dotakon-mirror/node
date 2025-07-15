@@ -2,7 +2,6 @@ use crate::keys;
 use crate::ssl;
 use crate::utils;
 use anyhow::{self, Context};
-use futures;
 use hyper::rt::{Read, ReadBufCursor, Write};
 use primitive_types::{H256, U256};
 use rustls::pki_types::ServerName;
@@ -17,8 +16,6 @@ use tokio::{
 };
 use tokio_rustls::{TlsAcceptor, TlsConnector, client, server};
 use tonic::transport::{Channel, Uri, server::Connected};
-use tower;
-use x509_parser;
 
 #[cfg(test)]
 use futures::future;
@@ -146,8 +143,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> Read for TlsClientStreamAdapter<IO> {
         context: &mut std::task::Context<'_>,
         mut buffer_cursor: ReadBufCursor<'_>,
     ) -> Poll<std::io::Result<()>> {
-        let mut raw = Vec::<u8>::new();
-        raw.resize(buffer_cursor.remaining(), 0);
+        let mut raw = vec![0u8; buffer_cursor.remaining()];
         let mut buffer = ReadBuf::new(raw.as_mut_slice());
         let poll = Pin::new(&mut self.inner).poll_read(context, &mut buffer);
         if let Poll::Ready(Ok(())) = &poll {
@@ -450,7 +446,7 @@ impl<IO: AsyncRead + AsyncWrite + Send + Unpin + 'static> tower::Service<Uri>
                 let mut guard = peer_certificate.lock().unwrap();
                 *guard = Some(certificate.clone());
             }
-            Ok(TlsClientStreamAdapter::new(stream, certificate)?)
+            TlsClientStreamAdapter::new(stream, certificate)
         })
     }
 }

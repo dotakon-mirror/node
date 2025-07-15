@@ -11,7 +11,6 @@ use ed25519_dalek::{self, ed25519::signature::SignerMut, pkcs8::EncodePrivateKey
 use ff::PrimeField;
 use pasta_curves::{group::Group, pallas::Point as PointPallas, pallas::Scalar as ScalarPallas};
 use primitive_types::{H256, U256};
-use rcgen;
 use sha3::{self, Digest};
 use std::ops::Deref;
 use std::sync::Mutex;
@@ -209,7 +208,7 @@ impl KeyManager {
             }
             None => Err(anyhow!("invalid signature: missing signature bytes")),
         }?;
-        let message_bytes = proto::encode_any_canonical(&payload);
+        let message_bytes = proto::encode_any_canonical(payload);
         Self::verify(message_bytes.as_slice(), &public_key, &signature)
     }
 
@@ -302,8 +301,8 @@ impl KeyManager {
         signature: &utils::DualSchnorrSignature,
     ) -> Result<()> {
         let challenge_25519 = Self::make_public_key_identity_challenge(
-            &public_key_pallas,
-            &public_key_25519,
+            public_key_pallas,
+            public_key_25519,
             &signature.nonce_pallas,
             &signature.nonce_25519,
         );

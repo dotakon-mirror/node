@@ -2,7 +2,6 @@ use anyhow::{self, Context};
 use ed25519_dalek::{self, Verifier};
 use pasta_curves::{group::GroupEncoding, pallas::Point as PointPallas};
 use primitive_types::U256;
-use rcgen;
 use rustls::{
     SignatureScheme, client::danger::ServerCertVerifier, server::danger::ClientCertVerifier,
 };
@@ -89,7 +88,7 @@ pub fn recover_c25519_public_key(certificate: &X509Certificate) -> Result<U256, 
             rustls::CertificateError::BadEncoding,
         ));
     }
-    Ok(U256::from_big_endian(&bytes))
+    Ok(U256::from_big_endian(bytes))
 }
 
 pub fn recover_pallas_public_key(certificate: &X509Certificate) -> Result<U256, rustls::Error> {

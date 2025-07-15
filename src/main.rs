@@ -74,10 +74,10 @@ fn get_random() -> U256 {
 }
 
 fn make_location(latitude: f64, longitude: f64) -> Result<dotakon::GeographicalLocation> {
-    if latitude < -90.0 || latitude > 90.0 {
+    if !(-90.0..=90.0).contains(&latitude) {
         return Err(anyhow!("the latitude is out of range"));
     }
-    if longitude < 0.0 || longitude > 180.0 {
+    if !(0.0..=180.0).contains(&longitude) {
         return Err(anyhow!("the longitude is out of range"));
     }
     Ok(dotakon::GeographicalLocation {

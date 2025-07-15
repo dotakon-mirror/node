@@ -42,9 +42,9 @@ fn encode_nibble(nibble: u8) -> char {
 fn encode_key<const KL: usize>(key: &[u8; KL]) -> String {
     let mut encoded = String::new();
     encoded.reserve(KL * 2);
-    for i in 0..KL {
-        encoded.push(encode_nibble(key[i] >> 4));
-        encoded.push(encode_nibble(key[i] & 0x0F));
+    for byte in key {
+        encoded.push(encode_nibble(*byte >> 4));
+        encoded.push(encode_nibble(*byte & 0x0F));
     }
     encoded
 }
@@ -101,10 +101,10 @@ impl<V> ValueTrie<V> {
     /// Looks up a value at the specified version.
     fn get(&self, key: &str, version: u64) -> Option<&V> {
         if key.is_empty() {
-            if let Some((_, value)) = self.values.range(..=version).rev().next() {
+            if let Some((_, value)) = self.values.range(..=version).next_back() {
                 return Some(value);
             }
-        } else if let Some((label, child)) = self.children.range(..=key.to_string()).rev().next() {
+        } else if let Some((label, child)) = self.children.range(..=key.to_string()).next_back() {
             if key.len() >= label.len() && key.starts_with(label) {
                 return child.get(&key[label.len()..], version);
             }
@@ -118,7 +118,7 @@ impl<V> ValueTrie<V> {
             self.values.insert(version, value);
             return;
         }
-        if let Some((label, child)) = self.children.range_mut(..=key.to_string()).rev().next() {
+        if let Some((label, child)) = self.children.range_mut(..=key.to_string()).next_back() {
             let prefix = common_prefix(key, label);
             if !prefix.is_empty() {
                 if prefix.len() < label.len() {
@@ -190,7 +190,7 @@ impl HashTrie {
             .collect();
         if key.is_empty() {
             vec![]
-        } else if let Some((label, child)) = self.children.range(..=key.to_string()).rev().next() {
+        } else if let Some((label, child)) = self.children.range(..=key.to_string()).next_back() {
             if key.len() >= label.len() && key.starts_with(label) {
                 let suffix = &key[label.len()..];
                 let mut path = child.lookup(suffix);
@@ -212,7 +212,7 @@ impl HashTrie {
             self.hash = hash;
             return Ok(());
         }
-        if let Some((label, child)) = self.children.range_mut(..=key.to_string()).rev().next() {
+        if let Some((label, child)) = self.children.range_mut(..=key.to_string()).next_back() {
             let prefix = common_prefix(key, label);
             if !prefix.is_empty() {
                 if prefix.len() < label.len() {
@@ -293,14 +293,12 @@ impl<V: Sha3Hash, const KL: usize> Proof<V, KL> {
     }
 
     fn verify_step<'a>(node: &BTreeMap<String, H256>, key: &'a str, hash: H256) -> Result<&'a str> {
-        for (label, child_hash) in node.range(..=key.to_string()).rev() {
+        if let Some((label, child_hash)) = node.range(..=key.to_string()).next_back() {
             if key.len() >= label.len() && key.starts_with(label) {
                 if *child_hash != hash {
                     return Err(anyhow!("invalid path (hash mismatch)"));
                 }
                 return Ok(&key[label.len()..]);
-            } else {
-                return Err(anyhow!("invalid path"));
             }
         }
         Err(anyhow!("invalid path"))
@@ -314,11 +312,7 @@ impl<V: Sha3Hash, const KL: usize> Proof<V, KL> {
                 root_hash
             ));
         }
-        let hashes: Vec<H256> = self
-            .path
-            .iter()
-            .map(|children| hash_flat_node(children))
-            .collect();
+        let hashes: Vec<H256> = self.path.iter().map(hash_flat_node).collect();
         let mut key = self.key.as_str();
         for i in (1..self.path.len()).rev() {
             key = Self::verify_step(&self.path[i], key, hashes[i - 1])?;
@@ -329,7 +323,7 @@ impl<V: Sha3Hash, const KL: usize> Proof<V, KL> {
             if *leaf_hash != value.sha3_hash() {
                 return Err(anyhow!("leaf hash mismatch"));
             }
-        } else if let Some(_) = leaf.get(key) {
+        } else if leaf.get(key).is_some() {
             return Err(anyhow!("element unexpectedly found"));
         }
         Ok(())
@@ -358,7 +352,7 @@ impl<V: Sha3Hash + Proto, const KL: usize> Proof<V, KL> {
                         .iter()
                         .map(|(label, hash)| (label.clone(), proto::h256_to_bytes32(*hash)))
                         .collect(),
-                    hash: Some(proto::h256_to_bytes32(hash_flat_node(&children))),
+                    hash: Some(proto::h256_to_bytes32(hash_flat_node(children))),
                 })
                 .collect(),
         })
@@ -422,15 +416,16 @@ impl<V: Clone + Sha3Hash, const KL: usize> MptState<V, KL> {
     }
 
     fn latest_version(&self) -> u64 {
-        let (version, _) = self.hashes.iter().rev().next().unwrap();
+        let (version, _) = self.hashes.iter().next_back().unwrap();
         *version
     }
 
     fn root_hash(&self, version: u64) -> H256 {
-        for (_, hashes) in self.hashes.range(..=version).rev() {
-            return hashes.hash();
+        if let Some((_, hashes)) = self.hashes.range(..=version).next_back() {
+            hashes.hash()
+        } else {
+            panic!("invalid MPT state (version 0 missing)");
         }
-        panic!("invalid MPT state (version 0 missing)");
     }
 
     fn get(&self, key: &str, version: u64) -> Option<&V> {
@@ -439,7 +434,7 @@ impl<V: Clone + Sha3Hash, const KL: usize> MptState<V, KL> {
 
     fn get_proof(&self, key: &str, version: u64) -> Result<Proof<V, KL>> {
         let maybe_value = self.values.get(key, version).cloned();
-        if let Some((_, hashes)) = self.hashes.range(..=version).rev().next() {
+        if let Some((_, hashes)) = self.hashes.range(..=version).next_back() {
             let path = hashes.lookup(key);
             Proof::<V, KL>::new(key.to_string(), maybe_value, path)
         } else {
@@ -460,7 +455,7 @@ impl<V: Clone + Sha3Hash, const KL: usize> MptState<V, KL> {
         if let Some(hashes) = self.hashes.get_mut(&version) {
             hashes.put(key, hash)?;
         } else {
-            let (_, hashes) = self.hashes.iter().rev().next().unwrap();
+            let (_, hashes) = self.hashes.iter().next_back().unwrap();
             let mut hashes = hashes.clone();
             hashes.put(key, hash)?;
             self.hashes.insert(version, hashes);

@@ -2,7 +2,6 @@ use crate::dotakon;
 use anyhow::Result;
 use primitive_types::H256;
 use primitive_types::U256;
-use prost;
 
 const MAX_VARINT_LENGTH: usize = 10;
 
