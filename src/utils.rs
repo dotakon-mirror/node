@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use curve25519_dalek::{
-    edwards::CompressedEdwardsY, edwards::EdwardsPoint as Point25519, scalar::Scalar as Scalar25519,
+    edwards::CompressedEdwardsY, edwards::EdwardsPoint as Point25519,
+    scalar::Scalar as Scalar25519, scalar::clamp_integer,
 };
 use ff::PrimeField;
 use oid_registry::{Oid, OidEntry, OidRegistry, asn1_rs::oid};
@@ -68,6 +69,10 @@ pub fn u256_to_c25519_scalar(value: U256) -> Result<Scalar25519> {
     Scalar25519::from_canonical_bytes(value.to_little_endian())
         .into_option()
         .context("invalid Curve25519 scalar")
+}
+
+pub fn u256_to_clamped_c25519_scalar(value: U256) -> Scalar25519 {
+    Scalar25519::from_bytes_mod_order(clamp_integer(value.to_little_endian()))
 }
 
 pub fn c25519_scalar_to_pallas_scalar(scalar: Scalar25519) -> ScalarPallas {
@@ -185,6 +190,14 @@ impl DualSchnorrSignature {
         );
         bytes.to_vec()
     }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct VerifiableRandomness {
+    pub public_key: Point25519,
+    pub randomness: Point25519,
+    pub challenge: Scalar25519,
+    pub signature: Scalar25519,
 }
 
 /// Converts the (Pallas) public key of an account to the corresponding wallet address. Basically

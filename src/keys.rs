@@ -3,10 +3,7 @@ use crate::proto;
 use crate::utils;
 use anyhow::{Result, anyhow};
 use base64::{Engine, prelude::BASE64_STANDARD};
-use curve25519_dalek::{
-    EdwardsPoint as Point25519,
-    scalar::{Scalar as Scalar25519, clamp_integer},
-};
+use curve25519_dalek::{EdwardsPoint as Point25519, scalar::Scalar as Scalar25519};
 use ed25519_dalek::{self, ed25519::signature::SignerMut, pkcs8::EncodePrivateKey};
 use ff::PrimeField;
 use pasta_curves::{group::Group, pallas::Point as PointPallas, pallas::Scalar as ScalarPallas};
@@ -246,7 +243,7 @@ impl KeyManager {
         );
         let mut hasher = sha3::Sha3_256::new();
         hasher.update(message.as_bytes());
-        Scalar25519::from_bytes_mod_order(clamp_integer(hasher.finalize().into()))
+        utils::u256_to_clamped_c25519_scalar(U256::from_little_endian(hasher.finalize().as_slice()))
     }
 
     fn make_own_public_key_identity_challenge(
@@ -263,7 +260,7 @@ impl KeyManager {
     }
 
     fn get_nonce_scalar_25519(secret_nonce: U256) -> Scalar25519 {
-        Scalar25519::from_bytes_mod_order(clamp_integer(secret_nonce.to_little_endian()))
+        utils::u256_to_clamped_c25519_scalar(secret_nonce)
     }
 
     fn get_nonce_scalar_pallas(secret_nonce: U256) -> ScalarPallas {
@@ -316,6 +313,69 @@ impl KeyManager {
             != signature.nonce_pallas + public_key_pallas * challenge_pallas
         {
             return Err(anyhow!("invalid signature"));
+        }
+        Ok(())
+    }
+
+    fn hash_to_curve(message: &[u8]) -> Point25519 {
+        let mut hasher = sha3::Sha3_256::new();
+        hasher.update(message);
+        let hash = U256::from_little_endian(hasher.finalize().as_slice());
+        Point25519::mul_base(&utils::u256_to_clamped_c25519_scalar(hash))
+    }
+
+    fn make_verifiable_randomness_challenge(
+        h: &Point25519,
+        r: &Point25519,
+        u: &Point25519,
+        v: &Point25519,
+    ) -> Scalar25519 {
+        const DOMAIN_SEPARATOR: &str = "dotakon/vrf-v1";
+        let message = format!(
+            "{{domain=\"{}\",h={:#x},r={:#x},u={:#x},v={:#x}}}",
+            DOMAIN_SEPARATOR,
+            utils::compress_point_c25519(h),
+            utils::compress_point_c25519(r),
+            utils::compress_point_c25519(u),
+            utils::compress_point_c25519(v),
+        );
+        let mut hasher = sha3::Sha3_256::new();
+        hasher.update(message.as_bytes());
+        utils::u256_to_clamped_c25519_scalar(U256::from_little_endian(hasher.finalize().as_slice()))
+    }
+
+    pub fn get_verifiable_randomness(
+        &self,
+        message: &[u8],
+        secret_nonce: U256,
+    ) -> utils::VerifiableRandomness {
+        let hash = Self::hash_to_curve(message);
+        let randomness = hash * self.private_key;
+        let nonce = utils::u256_to_clamped_c25519_scalar(secret_nonce);
+        let u = Point25519::mul_base(&nonce);
+        let v = hash * nonce;
+        let challenge = Self::make_verifiable_randomness_challenge(&hash, &randomness, &u, &v);
+        let signature = nonce + self.private_key * challenge;
+        utils::VerifiableRandomness {
+            public_key: self.public_key_point_25519,
+            randomness,
+            challenge,
+            signature,
+        }
+    }
+
+    pub fn verify_randomness(
+        message: &[u8],
+        randomness: &utils::VerifiableRandomness,
+    ) -> Result<()> {
+        let hash = Self::hash_to_curve(message);
+        let u = Point25519::mul_base(&randomness.signature)
+            - randomness.public_key * randomness.challenge;
+        let v = hash * randomness.signature - randomness.randomness * randomness.challenge;
+        let challenge =
+            Self::make_verifiable_randomness_challenge(&hash, &randomness.randomness, &u, &v);
+        if challenge != randomness.challenge {
+            return Err(anyhow!("invalid VRF proof"));
         }
         Ok(())
     }
@@ -736,5 +796,57 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    fn test_verifiable_randomness(secret_key: U256) {
+        let key_manager = KeyManager::new(secret_key);
+        let message = "Hello, world!";
+        let nonce = U256::from_little_endian(&[
+            1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+            24, 25, 26, 27, 28, 29, 30, 0, 0,
+        ]);
+        let randomness = key_manager.get_verifiable_randomness(message.as_bytes(), nonce);
+        assert!(KeyManager::verify_randomness(message.as_bytes(), &randomness).is_ok());
+    }
+
+    #[test]
+    fn test_verifiable_randomness1() {
+        let (secret_key, _, _) = utils::testing_keys1();
+        test_verifiable_randomness(secret_key);
+    }
+
+    #[test]
+    fn test_verifiable_randomness2() {
+        let (secret_key, _, _) = utils::testing_keys2();
+        test_verifiable_randomness(secret_key);
+    }
+
+    #[test]
+    fn test_verify_randomness_with_wrong_key() {
+        let (secret_key1, _, _) = utils::testing_keys1();
+        let (_, _, public_key2) = utils::testing_keys2();
+        let key_manager = KeyManager::new(secret_key1);
+        let message = "Hello, world!";
+        let nonce = U256::from_little_endian(&[
+            1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+            24, 25, 26, 27, 28, 29, 30, 0, 0,
+        ]);
+        let mut randomness = key_manager.get_verifiable_randomness(message.as_bytes(), nonce);
+        randomness.public_key = utils::decompress_point_c25519(public_key2).unwrap();
+        assert!(KeyManager::verify_randomness(message.as_bytes(), &randomness).is_err());
+    }
+
+    #[test]
+    fn test_verify_randomness_with_wrong_message() {
+        let (secret_key, _, _) = utils::testing_keys1();
+        let key_manager = KeyManager::new(secret_key);
+        let message1 = "Hello, world!";
+        let nonce = U256::from_little_endian(&[
+            1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+            24, 25, 26, 27, 28, 29, 30, 0, 0,
+        ]);
+        let randomness = key_manager.get_verifiable_randomness(message1.as_bytes(), nonce);
+        let message2 = "World, hello!";
+        assert!(KeyManager::verify_randomness(message2.as_bytes(), &randomness).is_err());
     }
 }
