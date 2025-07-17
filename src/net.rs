@@ -3,7 +3,7 @@ use crate::ssl;
 use crate::utils;
 use anyhow::{self, Context};
 use hyper::rt::{Read, ReadBufCursor, Write};
-use primitive_types::{H256, U256};
+use primitive_types::H256;
 use rustls::pki_types::ServerName;
 use std::io::{Error, ErrorKind};
 use std::net::SocketAddr;
@@ -26,7 +26,7 @@ use tokio::io::DuplexStream;
 #[derive(Debug, Clone)]
 pub struct ConnectionInfo {
     peer_certificate: rustls::pki_types::CertificateDer<'static>,
-    peer_public_key: U256,
+    peer_public_key: H256,
 }
 
 impl ConnectionInfo {
@@ -46,7 +46,7 @@ impl ConnectionInfo {
         self.peer_certificate.clone()
     }
 
-    pub fn peer_public_key(&self) -> U256 {
+    pub fn peer_public_key(&self) -> H256 {
         self.peer_public_key
     }
 
@@ -514,7 +514,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_tcp_connection() {
-        let nonce = U256::from_little_endian(&[
+        let nonce = H256::from_slice(&[
             1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
             24, 25, 26, 27, 28, 29, 30, 0, 0,
         ]);
@@ -617,7 +617,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_invalid_server_certificate() {
-        let nonce = U256::from_little_endian(&[
+        let nonce = H256::from_slice(&[
             1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
             24, 25, 26, 27, 28, 29, 30, 0, 0,
         ]);
@@ -678,7 +678,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_invalid_client_certificate() {
-        let nonce = U256::from_little_endian(&[
+        let nonce = H256::from_slice(&[
             1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
             24, 25, 26, 27, 28, 29, 30, 0, 0,
         ]);
@@ -752,7 +752,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_missing_client_certificate() {
-        let nonce = U256::from_little_endian(&[
+        let nonce = H256::from_slice(&[
             1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
             24, 25, 26, 27, 28, 29, 30, 0, 0,
         ]);
@@ -815,7 +815,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_mock_connection() {
-        let nonce = U256::from_little_endian(&[
+        let nonce = H256::from_slice(&[
             1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
             24, 25, 26, 27, 28, 29, 30, 0, 0,
         ]);

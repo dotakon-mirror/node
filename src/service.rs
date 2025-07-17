@@ -4,7 +4,7 @@ use crate::proto;
 use crate::utils;
 use crate::{keys, net};
 use anyhow::Context;
-use primitive_types::{H256, U256};
+use primitive_types::H256;
 use rand_core::{OsRng, RngCore};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -12,10 +12,10 @@ use std::time::SystemTime;
 use tokio_stream::Stream;
 use tonic::{Request, Response, Status, Streaming};
 
-fn get_random() -> U256 {
+fn get_random() -> H256 {
     let mut bytes = [0u8; 32];
     OsRng.fill_bytes(&mut bytes);
-    U256::from_little_endian(&bytes)
+    H256::from_slice(&bytes)
 }
 
 pub struct NodeService {
@@ -87,7 +87,7 @@ impl NodeService {
         })
     }
 
-    fn get_client_public_key<M>(&self, request: &Request<M>) -> anyhow::Result<U256> {
+    fn get_client_public_key<M>(&self, request: &Request<M>) -> anyhow::Result<H256> {
         let info = request
             .extensions()
             .get::<net::ConnectionInfo>()
@@ -226,6 +226,13 @@ impl NodeServiceV1 for NodeService {
         }))
     }
 
+    async fn broadcast_new_block(
+        &self,
+        _request: Request<dotakon::BroadcastBlockRequest>,
+    ) -> Result<Response<dotakon::BroadcastBlockResponse>, Status> {
+        todo!()
+    }
+
     type RefactorNetworkStream =
         Pin<Box<dyn Stream<Item = Result<dotakon::NetworkRefactoringResponse, Status>> + Send>>;
 
@@ -259,7 +266,7 @@ mod tests {
 
     impl TestFixture {
         pub async fn new(location: dotakon::GeographicalLocation) -> anyhow::Result<Self> {
-            let nonce = U256::from_little_endian(&[
+            let nonce = H256::from_slice(&[
                 1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22,
                 23, 24, 25, 26, 27, 28, 29, 30, 0, 0,
             ]);
@@ -340,7 +347,7 @@ mod tests {
     }
 
     fn genesis_block_hash() -> H256 {
-        "0x205d1806b1778989c9ad3b74eef406aa8dbe265bd56653f8169b3437c56475ae"
+        "0xa406a65a8e2f7afee90a4529e9c8669a0c78d31dab9e0e45def5ed1fd23f89ae"
             .parse()
             .unwrap()
     }
@@ -414,7 +421,7 @@ mod tests {
         );
         assert_eq!(
             proto::h256_from_bytes32(&payload.network_topology_root_hash.unwrap()),
-            "0xc41ca824ff35b570d239d89799df1d837dcca674c109ff7a13afa73f9a6b20b6"
+            "0x08c02c5001b9b0780aa3466891c1b28285d897429aba44692165a5ac6f5f89ec"
                 .parse()
                 .unwrap()
         );
@@ -463,7 +470,7 @@ mod tests {
         );
         assert_eq!(
             proto::h256_from_bytes32(&payload.network_topology_root_hash.unwrap()),
-            "0xc41ca824ff35b570d239d89799df1d837dcca674c109ff7a13afa73f9a6b20b6"
+            "0x08c02c5001b9b0780aa3466891c1b28285d897429aba44692165a5ac6f5f89ec"
                 .parse()
                 .unwrap()
         );

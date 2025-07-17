@@ -1,7 +1,7 @@
 use anyhow::{self, Context};
 use ed25519_dalek::{self, Verifier};
 use pasta_curves::{group::GroupEncoding, pallas::Point as PointPallas};
-use primitive_types::U256;
+use primitive_types::H256;
 use rustls::{
     SignatureScheme, client::danger::ServerCertVerifier, server::danger::ClientCertVerifier,
 };
@@ -15,7 +15,7 @@ use crate::utils;
 pub fn generate_certificate(
     key_manager: Arc<keys::KeyManager>,
     canonical_address: String,
-    secret_nonce: U256,
+    secret_nonce: H256,
 ) -> anyhow::Result<rcgen::Certificate> {
     let remote_key_pair: Box<dyn rcgen::RemoteKeyPair + Send + Sync> =
         Box::new(keys::RemoteEd25519KeyPair::from(key_manager.clone()));
@@ -43,7 +43,7 @@ pub fn generate_certificate(
         .custom_extensions
         .push(rcgen::CustomExtension::from_oid_content(
             public_key_oid.as_slice(),
-            key_manager.public_key().to_big_endian().to_vec(),
+            key_manager.public_key().to_fixed_bytes().to_vec(),
         ));
 
     let signature = key_manager.prove_public_key_identity(secret_nonce);
@@ -69,7 +69,7 @@ fn get_cert_not_after(certificate: &X509Certificate) -> u64 {
     certificate.tbs_certificate.validity.not_after.timestamp() as u64
 }
 
-pub fn recover_c25519_public_key(certificate: &X509Certificate) -> Result<U256, rustls::Error> {
+pub fn recover_c25519_public_key(certificate: &X509Certificate) -> Result<H256, rustls::Error> {
     let public_key = certificate
         .tbs_certificate
         .subject_pki
@@ -88,10 +88,10 @@ pub fn recover_c25519_public_key(certificate: &X509Certificate) -> Result<U256, 
             rustls::CertificateError::BadEncoding,
         ));
     }
-    Ok(U256::from_big_endian(bytes))
+    Ok(H256::from_slice(bytes))
 }
 
-pub fn recover_pallas_public_key(certificate: &X509Certificate) -> Result<U256, rustls::Error> {
+pub fn recover_pallas_public_key(certificate: &X509Certificate) -> Result<H256, rustls::Error> {
     let extensions = certificate.extensions_map().map_err(|_| {
         rustls::Error::General("public Pallas key not found in X.509 certificate".into())
     })?;
@@ -106,7 +106,7 @@ pub fn recover_pallas_public_key(certificate: &X509Certificate) -> Result<U256, 
     }
     let mut bytes = [0u8; 32];
     bytes.copy_from_slice(extension.value);
-    Ok(U256::from_big_endian(&bytes))
+    Ok(H256::from_slice(&bytes))
 }
 
 #[derive(Debug, Clone)]
@@ -164,7 +164,7 @@ impl CertificateVerifier {
 
         let public_key_pallas = recover_pallas_public_key(&certificate)?;
         let public_key_point_pallas =
-            match PointPallas::from_bytes(&public_key_pallas.to_big_endian()).into_option() {
+            match PointPallas::from_bytes(&public_key_pallas.to_fixed_bytes()).into_option() {
                 Some(point) => Ok(point),
                 None => Err(rustls::Error::InvalidCertificate(
                     rustls::CertificateError::BadEncoding,
@@ -201,10 +201,10 @@ impl CertificateVerifier {
             })?;
 
         let public_key = recover_c25519_public_key(&parsed_certificate)?;
-        let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&public_key.to_big_endian())
+        let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&public_key.to_fixed_bytes())
             .map_err(|_| {
-                rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding)
-            })?;
+            rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding)
+        })?;
 
         if dss.signature().len() != ed25519_dalek::SIGNATURE_LENGTH {
             return Err(rustls::Error::InvalidCertificate(
@@ -364,7 +364,7 @@ mod tests {
     fn test_certificate_generation() {
         let (secret_key, public_key_pallas, public_key_25519) = utils::testing_keys1();
         let key_manager = Arc::new(keys::KeyManager::new(secret_key));
-        let nonce = U256::from_little_endian(&[
+        let nonce = H256::from_slice(&[
             1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
             24, 25, 26, 27, 28, 29, 30, 0, 0,
         ]);
@@ -390,13 +390,13 @@ mod tests {
         assert_eq!(
             parsed.tbs_certificate.subject_pki.parsed().unwrap(),
             x509_parser::public_key::PublicKey::Unknown(
-                public_key_25519.to_big_endian().as_slice()
+                public_key_25519.to_fixed_bytes().as_slice()
             )
         );
         assert_eq!(
             parsed.public_key().parsed().unwrap(),
             x509_parser::public_key::PublicKey::Unknown(
-                public_key_25519.to_big_endian().as_slice()
+                public_key_25519.to_fixed_bytes().as_slice()
             )
         );
         assert_eq!(
@@ -405,7 +405,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .value,
-            public_key_pallas.to_big_endian().as_slice()
+            public_key_pallas.to_fixed_bytes().as_slice()
         );
         let identity_signature_extension = parsed
             .get_extension_unique(&utils::OID_DOTAKON_IDENTITY_SIGNATURE_DUAL_SCHNORR)
@@ -421,9 +421,9 @@ mod tests {
         .unwrap();
     }
 
-    fn test_recover_public_keys(secret_key: U256) {
+    fn test_recover_public_keys(secret_key: H256) {
         let key_manager = Arc::new(keys::KeyManager::new(secret_key));
-        let nonce = U256::from_little_endian(&[
+        let nonce = H256::from_slice(&[
             1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
             24, 25, 26, 27, 28, 29, 30, 0, 0,
         ]);
@@ -458,7 +458,7 @@ mod tests {
     fn test_certificate_validity() {
         let (secret_key, _, _) = utils::testing_keys1();
         let key_manager = Arc::new(keys::KeyManager::new(secret_key));
-        let nonce = U256::from_little_endian(&[
+        let nonce = H256::from_slice(&[
             1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
             24, 25, 26, 27, 28, 29, 30, 0, 0,
         ]);
@@ -510,7 +510,7 @@ mod tests {
     fn test_client_certificate_verification() {
         let (secret_key, _, _) = utils::testing_keys1();
         let key_manager = Arc::new(keys::KeyManager::new(secret_key));
-        let nonce = U256::from_little_endian(&[
+        let nonce = H256::from_slice(&[
             1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
             24, 25, 26, 27, 28, 29, 30, 0, 0,
         ]);
@@ -528,7 +528,7 @@ mod tests {
     fn test_not_yet_valid_client_certificate_verification() {
         let (secret_key, _, _) = utils::testing_keys1();
         let key_manager = Arc::new(keys::KeyManager::new(secret_key));
-        let nonce = U256::from_little_endian(&[
+        let nonce = H256::from_slice(&[
             1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
             24, 25, 26, 27, 28, 29, 30, 0, 0,
         ]);
@@ -553,7 +553,7 @@ mod tests {
     fn test_expired_client_certificate_verification() {
         let (secret_key, _, _) = utils::testing_keys1();
         let key_manager = Arc::new(keys::KeyManager::new(secret_key));
-        let nonce = U256::from_little_endian(&[
+        let nonce = H256::from_slice(&[
             1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
             24, 25, 26, 27, 28, 29, 30, 0, 0,
         ]);
@@ -602,7 +602,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_mutual_tls() {
-        let nonce = U256::from_little_endian(&[
+        let nonce = H256::from_slice(&[
             1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
             24, 25, 26, 27, 28, 29, 30, 0, 0,
         ]);

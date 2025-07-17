@@ -46,6 +46,13 @@ impl NodeServiceV1 for FakeNodeService {
         }))
     }
 
+    async fn broadcast_new_block(
+        &self,
+        _request: Request<dotakon::BroadcastBlockRequest>,
+    ) -> Result<Response<dotakon::BroadcastBlockResponse>, Status> {
+        todo!()
+    }
+
     type RefactorNetworkStream =
         Pin<Box<dyn Stream<Item = Result<dotakon::NetworkRefactoringResponse, Status>> + Send>>;
 

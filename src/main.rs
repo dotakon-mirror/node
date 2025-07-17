@@ -1,7 +1,7 @@
 use anyhow::{Result, anyhow};
 use clap::Parser;
 use dotakon::node_service_v1_server::NodeServiceV1Server;
-use primitive_types::U256;
+use primitive_types::H256;
 use rand_core::{OsRng, RngCore};
 use std::sync::Arc;
 use tonic::transport::Server;
@@ -67,10 +67,10 @@ struct Args {
     bootstrap_list: Vec<String>,
 }
 
-fn get_random() -> U256 {
+fn get_random() -> H256 {
     let mut bytes = [0u8; 32];
     OsRng.fill_bytes(&mut bytes);
-    U256::from_little_endian(&bytes)
+    H256::from_slice(&bytes)
 }
 
 fn make_location(latitude: f64, longitude: f64) -> Result<dotakon::GeographicalLocation> {
@@ -95,7 +95,7 @@ async fn main() -> Result<()> {
         println!("New secret key: {:#x}", key);
         key
     } else {
-        U256::from_str_radix(args.secret_key.as_str(), 16)?
+        args.secret_key.parse::<H256>()?
     };
 
     let key_manager = Arc::new(keys::KeyManager::new(secret_key));

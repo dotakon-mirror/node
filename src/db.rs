@@ -371,7 +371,7 @@ mod tests {
         let (payload, signature) = key_manager
             .sign_message(
                 &identity,
-                U256::from_little_endian(&[
+                H256::from_slice(&[
                     1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
                     22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32,
                 ]),
@@ -384,7 +384,7 @@ mod tests {
     }
 
     fn genesis_block_hash() -> H256 {
-        "0x205d1806b1778989c9ad3b74eef406aa8dbe265bd56653f8169b3437c56475ae"
+        "0xa406a65a8e2f7afee90a4529e9c8669a0c78d31dab9e0e45def5ed1fd23f89ae"
             .parse()
             .unwrap()
     }
@@ -496,7 +496,7 @@ mod tests {
         assert_eq!(db.get_latest_block().hash(), genesis_block_hash);
     }
 
-    fn test_initial_balance(public_key: U256) {
+    fn test_initial_balance(public_key: H256) {
         let db = Db::new(testing_identity()).unwrap();
         let account_address = utils::public_key_to_wallet_address(public_key);
         let (block, proof) = db.get_latest_balance(account_address).unwrap();
@@ -517,7 +517,7 @@ mod tests {
         test_initial_balance(public_key);
     }
 
-    fn test_balance_at_first_block(public_key: U256) {
+    fn test_balance_at_first_block(public_key: H256) {
         let db = Db::new(testing_identity()).unwrap();
         let account_address = utils::public_key_to_wallet_address(public_key);
         let (block, proof) = db
