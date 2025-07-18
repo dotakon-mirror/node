@@ -166,9 +166,9 @@ impl DualSchnorrSignature {
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct VerifiableRandomness {
-    pub output: Point25519,
-    pub challenge: Scalar25519,
-    pub signature: Scalar25519,
+    pub output: PointPallas,
+    pub challenge: ScalarPallas,
+    pub signature: ScalarPallas,
 }
 
 impl VerifiableRandomness {
@@ -176,17 +176,17 @@ impl VerifiableRandomness {
 
     pub fn decode(bytes: &[u8; Self::LENGTH]) -> Result<VerifiableRandomness> {
         Ok(VerifiableRandomness {
-            output: decompress_point_c25519(H256::from_slice(&bytes[0..32]))?,
-            challenge: u256_to_c25519_scalar(U256::from_little_endian(&bytes[32..64]))?,
-            signature: u256_to_c25519_scalar(U256::from_little_endian(&bytes[64..96]))?,
+            output: decompress_point_pallas(H256::from_slice(&bytes[0..32]))?,
+            challenge: u256_to_pallas_scalar(U256::from_little_endian(&bytes[32..64]))?,
+            signature: u256_to_pallas_scalar(U256::from_little_endian(&bytes[64..96]))?,
         })
     }
 
     pub fn encode(&self) -> Vec<u8> {
         let mut bytes = [0u8; Self::LENGTH];
-        bytes[0..32].copy_from_slice(&compress_point_c25519(&self.output).to_fixed_bytes());
-        bytes[32..64].copy_from_slice(&c25519_scalar_to_u256(self.challenge).to_little_endian());
-        bytes[64..96].copy_from_slice(&c25519_scalar_to_u256(self.signature).to_little_endian());
+        bytes[0..32].copy_from_slice(&compress_point_pallas(&self.output).to_fixed_bytes());
+        bytes[32..64].copy_from_slice(&pallas_scalar_to_u256(self.challenge).to_little_endian());
+        bytes[64..96].copy_from_slice(&pallas_scalar_to_u256(self.signature).to_little_endian());
         bytes.to_vec()
     }
 }
@@ -507,18 +507,18 @@ mod tests {
 
     #[test]
     fn test_verifiable_randomness_encoding() {
-        let scalar1 = Scalar25519::from_canonical_bytes([
+        let scalar1 = ScalarPallas::from_repr_vartime([
             1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
             24, 25, 26, 27, 28, 29, 30, 0, 0,
         ])
         .unwrap();
-        let scalar2 = Scalar25519::from_canonical_bytes([
+        let scalar2 = ScalarPallas::from_repr_vartime([
             30u8, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10,
             9, 8, 7, 6, 5, 4, 3, 2, 1, 0, 0,
         ])
         .unwrap();
         let randomness = VerifiableRandomness {
-            output: Point25519::mul_base(&scalar1),
+            output: PointPallas::generator() * scalar1,
             challenge: scalar1,
             signature: scalar2,
         };

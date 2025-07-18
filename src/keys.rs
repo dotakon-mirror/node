@@ -1,11 +1,14 @@
 use crate::dotakon;
 use crate::proto;
 use crate::utils;
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use base64::{Engine, prelude::BASE64_STANDARD};
 use curve25519_dalek::{EdwardsPoint as Point25519, scalar::Scalar as Scalar25519};
 use ed25519_dalek::{self, ed25519::signature::SignerMut, pkcs8::EncodePrivateKey};
-use pasta_curves::{group::Group, pallas::Point as PointPallas, pallas::Scalar as ScalarPallas};
+use pasta_curves::{
+    arithmetic::CurveExt, group::Group, pallas::Point as PointPallas,
+    pallas::Scalar as ScalarPallas,
+};
 use primitive_types::H256;
 use sha3::{self, Digest};
 use std::ops::Deref;
@@ -312,27 +315,30 @@ impl KeyManager {
         Ok(())
     }
 
-    fn hash_to_curve(message: &[u8]) -> Point25519 {
+    fn hash_to_curve(message: &[u8]) -> PointPallas {
         const DOMAIN_SEPARATOR: &str = "dotakon/vrf-v1";
-        Point25519::hash_to_curve::<sha3::Sha3_512>(&[message], &[DOMAIN_SEPARATOR.as_bytes()])
+        let hasher = PointPallas::hash_to_curve(DOMAIN_SEPARATOR);
+        hasher(message)
     }
 
     fn make_verifiable_randomness_challenge(
-        h: &Point25519,
-        r: &Point25519,
-        u: &Point25519,
-        v: &Point25519,
-    ) -> Scalar25519 {
+        h: &PointPallas,
+        r: &PointPallas,
+        u: &PointPallas,
+        v: &PointPallas,
+    ) -> ScalarPallas {
         const DOMAIN_SEPARATOR: &str = "dotakon/vrf-v1";
         let message = format!(
             "{{domain=\"{}\",h={:#x},r={:#x},u={:#x},v={:#x}}}",
             DOMAIN_SEPARATOR,
-            utils::compress_point_c25519(h),
-            utils::compress_point_c25519(r),
-            utils::compress_point_c25519(u),
-            utils::compress_point_c25519(v),
+            utils::compress_point_pallas(h),
+            utils::compress_point_pallas(r),
+            utils::compress_point_pallas(u),
+            utils::compress_point_pallas(v),
         );
-        Scalar25519::hash_from_bytes::<sha3::Sha3_512>(message.as_bytes())
+        utils::c25519_scalar_to_pallas_scalar(Scalar25519::hash_from_bytes::<sha3::Sha3_512>(
+            message.as_bytes(),
+        ))
     }
 
     pub fn get_verifiable_randomness(
@@ -341,12 +347,13 @@ impl KeyManager {
         secret_nonce: H256,
     ) -> utils::VerifiableRandomness {
         let hash = Self::hash_to_curve(message);
-        let randomness = hash * self.private_key;
-        let nonce = utils::hash_to_c25519_scalar(secret_nonce);
-        let u = Point25519::mul_base(&nonce);
+        let private_key = utils::c25519_scalar_to_pallas_scalar(self.private_key);
+        let randomness = hash * private_key;
+        let nonce = utils::hash_to_pallas_scalar(secret_nonce);
+        let u = PointPallas::generator() * nonce;
         let v = hash * nonce;
         let challenge = Self::make_verifiable_randomness_challenge(&hash, &randomness, &u, &v);
-        let signature = nonce + self.private_key * challenge;
+        let signature = nonce + private_key * challenge;
         utils::VerifiableRandomness {
             output: randomness,
             challenge,
@@ -354,13 +361,28 @@ impl KeyManager {
         }
     }
 
+    pub fn get_verifiable_randomness_proto(
+        &self,
+        message: &[u8],
+        secret_nonce: H256,
+    ) -> dotakon::VerifiableRandomness {
+        let randomness = self.get_verifiable_randomness(message, secret_nonce);
+        dotakon::VerifiableRandomness {
+            prover: Some(proto::h256_to_bytes32(self.wallet_address)),
+            scheme: Some(dotakon::VerifiableRandomnessScheme::VrfDdhPallasSha3 as i32),
+            public_key: Some(self.public_key_pallas.to_fixed_bytes().to_vec()),
+            message: Some(message.to_vec()),
+            randomness: Some(randomness.encode()),
+        }
+    }
+
     pub fn verify_randomness(
-        public_key: &Point25519,
+        public_key: &PointPallas,
         message: &[u8],
         randomness: &utils::VerifiableRandomness,
     ) -> Result<()> {
         let hash = Self::hash_to_curve(message);
-        let u = Point25519::mul_base(&randomness.signature) - public_key * randomness.challenge;
+        let u = PointPallas::generator() * randomness.signature - public_key * randomness.challenge;
         let v = hash * randomness.signature - randomness.output * randomness.challenge;
         let challenge =
             Self::make_verifiable_randomness_challenge(&hash, &randomness.output, &u, &v);
@@ -368,6 +390,44 @@ impl KeyManager {
             return Err(anyhow!("invalid VRF proof"));
         }
         Ok(())
+    }
+
+    pub fn verify_randomness_proto(proto: &dotakon::VerifiableRandomness) -> Result<()> {
+        if proto.scheme.context("missing VRF scheme field")?
+            != dotakon::VerifiableRandomnessScheme::VrfDdhPallasSha3 as i32
+        {
+            return Err(anyhow!("unknown VRF scheme"));
+        }
+        let prover =
+            proto::h256_from_bytes32(&proto.prover.context("missing prover address field")?);
+        let (public_key, wallet_address) = match &proto.public_key {
+            Some(bytes) => {
+                let public_key = H256::from_slice(bytes.as_slice());
+                let wallet_address = utils::public_key_to_wallet_address(public_key);
+                let public_key = utils::decompress_point_pallas(public_key)?;
+                Ok((public_key, wallet_address))
+            }
+            None => Err(anyhow!("missing public key field")),
+        }?;
+        if prover != wallet_address {
+            return Err(anyhow!("invalid prover account address"));
+        }
+        let message = proto
+            .message
+            .as_ref()
+            .context("missing seed message field")?
+            .as_slice();
+        let randomness = {
+            let randomness = proto
+                .randomness
+                .as_ref()
+                .context("missing randomness field")?
+                .as_slice();
+            let mut bytes = [0u8; utils::VerifiableRandomness::LENGTH];
+            bytes.copy_from_slice(randomness);
+            utils::VerifiableRandomness::decode(&bytes)?
+        };
+        Self::verify_randomness(&public_key, message, &randomness)
     }
 }
 
@@ -798,7 +858,7 @@ mod tests {
         let randomness = key_manager.get_verifiable_randomness(message.as_bytes(), nonce);
         assert!(
             KeyManager::verify_randomness(
-                &utils::decompress_point_c25519(key_manager.public_key_25519()).unwrap(),
+                &utils::decompress_point_pallas(key_manager.public_key()).unwrap(),
                 message.as_bytes(),
                 &randomness
             )
@@ -821,7 +881,7 @@ mod tests {
     #[test]
     fn test_verify_randomness_with_wrong_key() {
         let (secret_key1, _, _) = utils::testing_keys1();
-        let (_, _, public_key2) = utils::testing_keys2();
+        let (_, public_key2, _) = utils::testing_keys2();
         let key_manager = KeyManager::new(secret_key1);
         let message = "Hello, world!";
         let nonce = H256::from_slice(&[
@@ -831,7 +891,7 @@ mod tests {
         let randomness = key_manager.get_verifiable_randomness(message.as_bytes(), nonce);
         assert!(
             KeyManager::verify_randomness(
-                &utils::decompress_point_c25519(public_key2).unwrap(),
+                &utils::decompress_point_pallas(public_key2).unwrap(),
                 message.as_bytes(),
                 &randomness
             )
@@ -841,7 +901,7 @@ mod tests {
 
     #[test]
     fn test_verify_randomness_with_wrong_message() {
-        let (secret_key, _, public_key) = utils::testing_keys1();
+        let (secret_key, public_key, _) = utils::testing_keys1();
         let key_manager = KeyManager::new(secret_key);
         let message1 = "Hello, world!";
         let nonce = H256::from_slice(&[
@@ -852,11 +912,64 @@ mod tests {
         let message2 = "World, hello!";
         assert!(
             KeyManager::verify_randomness(
-                &utils::decompress_point_c25519(public_key).unwrap(),
+                &utils::decompress_point_pallas(public_key).unwrap(),
                 message2.as_bytes(),
                 &randomness
             )
             .is_err()
         );
+    }
+
+    fn test_verifiable_randomness_proto(secret_key: H256) {
+        let key_manager = KeyManager::new(secret_key);
+        let message = "Hello, world!";
+        let nonce = H256::from_slice(&[
+            1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+            24, 25, 26, 27, 28, 29, 30, 0, 0,
+        ]);
+        let randomness = key_manager.get_verifiable_randomness_proto(message.as_bytes(), nonce);
+        assert!(KeyManager::verify_randomness_proto(&randomness).is_ok());
+    }
+
+    #[test]
+    fn test_verifiable_randomness_proto1() {
+        let (secret_key, _, _) = utils::testing_keys1();
+        test_verifiable_randomness_proto(secret_key);
+    }
+
+    #[test]
+    fn test_verifiable_randomness_proto2() {
+        let (secret_key, _, _) = utils::testing_keys2();
+        test_verifiable_randomness_proto(secret_key);
+    }
+
+    #[test]
+    fn test_verify_randomness_proto_with_wrong_key() {
+        let (secret_key1, _, _) = utils::testing_keys1();
+        let (_, public_key2, _) = utils::testing_keys2();
+        let key_manager = KeyManager::new(secret_key1);
+        let message = "Hello, world!";
+        let nonce = H256::from_slice(&[
+            1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+            24, 25, 26, 27, 28, 29, 30, 0, 0,
+        ]);
+        let mut randomness = key_manager.get_verifiable_randomness_proto(message.as_bytes(), nonce);
+        randomness.public_key = Some(public_key2.to_fixed_bytes().to_vec());
+        assert!(KeyManager::verify_randomness_proto(&randomness,).is_err());
+    }
+
+    #[test]
+    fn test_verify_randomness_proto_with_wrong_message() {
+        let (secret_key, _, _) = utils::testing_keys1();
+        let key_manager = KeyManager::new(secret_key);
+        let message1 = "Hello, world!";
+        let nonce = H256::from_slice(&[
+            1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+            24, 25, 26, 27, 28, 29, 30, 0, 0,
+        ]);
+        let mut randomness =
+            key_manager.get_verifiable_randomness_proto(message1.as_bytes(), nonce);
+        randomness.message = Some("World, hello!".as_bytes().to_vec());
+        assert!(KeyManager::verify_randomness_proto(&randomness).is_err());
     }
 }
