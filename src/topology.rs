@@ -196,7 +196,6 @@ mod tests {
     use super::*;
     use crate::keys;
     use crate::utils;
-    use primitive_types::U256;
 
     #[test]
     fn test_node() {

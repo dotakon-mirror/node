@@ -322,6 +322,7 @@ impl KeyManager {
     }
 
     fn make_verifiable_randomness_challenge(
+        public_key: &PointPallas,
         h: &PointPallas,
         r: &PointPallas,
         u: &PointPallas,
@@ -329,8 +330,9 @@ impl KeyManager {
     ) -> ScalarPallas {
         const DOMAIN_SEPARATOR: &str = "dotakon/vrf-v1";
         let message = format!(
-            "{{domain=\"{}\",h={:#x},r={:#x},u={:#x},v={:#x}}}",
+            "{{domain=\"{}\",pk={},h={:#x},r={:#x},u={:#x},v={:#x}}}",
             DOMAIN_SEPARATOR,
+            utils::compress_point_pallas(public_key),
             utils::compress_point_pallas(h),
             utils::compress_point_pallas(r),
             utils::compress_point_pallas(u),
@@ -339,6 +341,16 @@ impl KeyManager {
         utils::c25519_scalar_to_pallas_scalar(Scalar25519::hash_from_bytes::<sha3::Sha3_512>(
             message.as_bytes(),
         ))
+    }
+
+    fn make_own_verifiable_randomness_challenge(
+        &self,
+        h: &PointPallas,
+        r: &PointPallas,
+        u: &PointPallas,
+        v: &PointPallas,
+    ) -> ScalarPallas {
+        Self::make_verifiable_randomness_challenge(&self.public_key_point_pallas, h, r, u, v)
     }
 
     pub fn get_verifiable_randomness(
@@ -352,7 +364,7 @@ impl KeyManager {
         let nonce = utils::hash_to_pallas_scalar(secret_nonce);
         let u = PointPallas::generator() * nonce;
         let v = hash * nonce;
-        let challenge = Self::make_verifiable_randomness_challenge(&hash, &randomness, &u, &v);
+        let challenge = self.make_own_verifiable_randomness_challenge(&hash, &randomness, &u, &v);
         let signature = nonce + private_key * challenge;
         utils::VerifiableRandomness {
             output: randomness,
@@ -384,8 +396,13 @@ impl KeyManager {
         let hash = Self::hash_to_curve(message);
         let u = PointPallas::generator() * randomness.signature - public_key * randomness.challenge;
         let v = hash * randomness.signature - randomness.output * randomness.challenge;
-        let challenge =
-            Self::make_verifiable_randomness_challenge(&hash, &randomness.output, &u, &v);
+        let challenge = Self::make_verifiable_randomness_challenge(
+            public_key,
+            &hash,
+            &randomness.output,
+            &u,
+            &v,
+        );
         if challenge != randomness.challenge {
             return Err(anyhow!("invalid VRF proof"));
         }

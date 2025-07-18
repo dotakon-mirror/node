@@ -86,7 +86,7 @@ fn make_location(latitude: f64, longitude: f64) -> Result<dotakon::GeographicalL
     })
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
     let args = Args::parse();
 

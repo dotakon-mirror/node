@@ -226,6 +226,13 @@ impl NodeServiceV1 for NodeService {
         }))
     }
 
+    async fn broadcast_transaction(
+        &self,
+        _request: Request<dotakon::BroadcastTransactionRequest>,
+    ) -> Result<Response<dotakon::BroadcastTransactionResponse>, Status> {
+        todo!()
+    }
+
     async fn broadcast_new_block(
         &self,
         _request: Request<dotakon::BroadcastBlockRequest>,
