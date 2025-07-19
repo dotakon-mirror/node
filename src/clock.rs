@@ -1,11 +1,5 @@
 use std::time::SystemTime;
 
-#[cfg(test)]
-use std::sync::Mutex;
-
-#[cfg(test)]
-use std::time::Duration;
-
 pub trait Clock: Send + Sync {
     fn now(&self) -> SystemTime;
 }
@@ -26,42 +20,70 @@ impl Clock for RealClock {
 }
 
 #[cfg(test)]
-pub struct MockClock {
-    time: Mutex<SystemTime>,
-}
+pub mod test {
+    use super::*;
+    use std::sync::Mutex;
+    use std::time::Duration;
 
-#[cfg(test)]
-impl MockClock {
-    pub fn new(start_time: SystemTime) -> Self {
-        Self {
-            time: Mutex::new(start_time),
+    pub struct MockClock {
+        time: Mutex<SystemTime>,
+    }
+
+    impl MockClock {
+        pub fn new(start_time: SystemTime) -> Self {
+            Self {
+                time: Mutex::new(start_time),
+            }
+        }
+
+        pub fn advance(&self, delta: Duration) {
+            *self.time.lock().unwrap() += delta;
         }
     }
 
-    pub fn advance(&self, delta: Duration) {
-        *self.time.lock().unwrap() += delta;
-    }
-}
-
-#[cfg(test)]
-impl Default for MockClock {
-    fn default() -> Self {
-        Self {
-            time: Mutex::new(SystemTime::UNIX_EPOCH),
+    impl Default for MockClock {
+        fn default() -> Self {
+            Self {
+                time: Mutex::new(SystemTime::UNIX_EPOCH),
+            }
         }
     }
-}
 
-#[cfg(test)]
-impl Clock for MockClock {
-    fn now(&self) -> SystemTime {
-        *self.time.lock().unwrap()
+    impl Clock for MockClock {
+        fn now(&self) -> SystemTime {
+            *self.time.lock().unwrap()
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+    use test::MockClock;
 
-    // TODO
+    #[test]
+    fn test_default_mock_clock() {
+        let clock = MockClock::default();
+        assert_eq!(clock.now(), SystemTime::UNIX_EPOCH);
+    }
+
+    #[test]
+    fn test_new_mock_clock() {
+        let clock = MockClock::new(SystemTime::UNIX_EPOCH + Duration::from_secs(123));
+        assert_eq!(
+            clock.now(),
+            SystemTime::UNIX_EPOCH + Duration::from_secs(123)
+        );
+    }
+
+    #[test]
+    fn test_advance_mock_clock() {
+        let clock = MockClock::new(SystemTime::UNIX_EPOCH + Duration::from_secs(456));
+        clock.advance(Duration::from_secs(789));
+        assert_eq!(
+            clock.now(),
+            SystemTime::UNIX_EPOCH + Duration::from_secs(1245)
+        );
+    }
 }

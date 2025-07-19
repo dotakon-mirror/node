@@ -38,11 +38,14 @@ impl BlockInfo {
         program_storage_root_hash: H256,
     ) -> H256 {
         let message = format!(
-            "{{domain=\"{}\",number={},previous={:#x},network={:#x},transactions={:#x},balances={:#x},programs={:#x}}}",
+            "{{domain=\"{}\",number={},previous={:#x},timestamp={},network={:#x},transactions={:#x},balances={:#x},programs={:#x}}}",
             version::BLOCK_HASH_DOMAIN_SEPARATOR,
             block_number,
             previous_block_hash,
-            // TODO: add the timestamp.
+            timestamp
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
             network_topology_root_hash,
             transactions_root_hash,
             account_balances_root_hash,
@@ -418,7 +421,7 @@ impl Db {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::clock::MockClock;
+    use crate::clock::test::MockClock;
     use crate::keys;
     use crate::mpt::{Proto, Sha3Hash};
     use crate::utils;
@@ -426,6 +429,10 @@ mod tests {
 
     fn mock_clock(start_time: SystemTime) -> Arc<dyn Clock> {
         Arc::new(MockClock::new(start_time))
+    }
+
+    fn default_mock_clock() -> Arc<dyn Clock> {
+        Arc::new(MockClock::default())
     }
 
     fn testing_identity() -> dotakon::NodeIdentity {
@@ -463,7 +470,7 @@ mod tests {
     }
 
     fn genesis_block_hash() -> H256 {
-        "0xf8f5eca34e90e62c85bf4fe454a0ac9da67afcc3b37e8bf747bfe68f07c30744"
+        "0xffe38ab1b54a4d8f6654db5e61c355a3f8aa920fb4f0fdb1c6e3a4f59bea8dda"
             .parse()
             .unwrap()
     }
@@ -506,7 +513,7 @@ mod tests {
         );
         assert_eq!(
             block.hash(),
-            "0xe00da0dfba03e1f2258c7f05f422e2593664602c76f40bd142c4ec30d01efc9f"
+            "0xb5664994b0be201b2400bc7f5c604be85b06859dabe71313eda2f79b10e1b88d"
                 .parse()
                 .unwrap()
         );
@@ -581,7 +588,7 @@ mod tests {
 
     #[test]
     fn test_initial_state() {
-        let clock = mock_clock(SystemTime::UNIX_EPOCH);
+        let clock = mock_clock(SystemTime::UNIX_EPOCH + Duration::from_secs(71104));
         let db = Db::new(clock, testing_identity()).unwrap();
         assert_eq!(db.current_version(), 1);
         let genesis_block_hash = genesis_block_hash();
@@ -597,7 +604,7 @@ mod tests {
     }
 
     fn test_initial_balance(public_key: H256) {
-        let clock = mock_clock(SystemTime::UNIX_EPOCH);
+        let clock = mock_clock(SystemTime::UNIX_EPOCH + Duration::from_secs(71104));
         let db = Db::new(clock, testing_identity()).unwrap();
         let account_address = utils::public_key_to_wallet_address(public_key);
         let (block, proof) = db.get_latest_balance(account_address).unwrap();
@@ -619,7 +626,7 @@ mod tests {
     }
 
     fn test_balance_at_first_block(public_key: H256) {
-        let clock = mock_clock(SystemTime::UNIX_EPOCH);
+        let clock = mock_clock(SystemTime::UNIX_EPOCH + Duration::from_secs(71104));
         let db = Db::new(clock, testing_identity()).unwrap();
         let account_address = utils::public_key_to_wallet_address(public_key);
         let (block, proof) = db

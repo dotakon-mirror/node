@@ -265,13 +265,14 @@ impl NodeServiceV1 for NodeService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::clock::MockClock;
+    use crate::clock::test::MockClock;
     use crate::dotakon::{
         self, node_service_v1_client::NodeServiceV1Client,
         node_service_v1_server::NodeServiceV1Server,
     };
     use crate::ssl;
     use primitive_types::H256;
+    use std::time::Duration;
     use tokio::sync::Notify;
     use tokio::task::JoinHandle;
     use tonic::transport::{Channel, Server};
@@ -305,7 +306,9 @@ mod tests {
                     .unwrap(),
             );
 
-            let clock: Arc<dyn Clock> = Arc::new(MockClock::default());
+            let clock: Arc<dyn Clock> = Arc::new(MockClock::new(
+                SystemTime::UNIX_EPOCH + Duration::from_secs(71104),
+            ));
 
             let service = NodeServiceV1Server::new(NodeService::new(
                 clock.clone(),
@@ -375,7 +378,7 @@ mod tests {
     }
 
     fn genesis_block_hash() -> H256 {
-        "0xf8f5eca34e90e62c85bf4fe454a0ac9da67afcc3b37e8bf747bfe68f07c30744"
+        "0xffe38ab1b54a4d8f6654db5e61c355a3f8aa920fb4f0fdb1c6e3a4f59bea8dda"
             .parse()
             .unwrap()
     }
