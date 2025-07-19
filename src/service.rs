@@ -1,8 +1,11 @@
+use crate::clock::Clock;
 use crate::db;
 use crate::dotakon::{self, node_service_v1_server::NodeServiceV1};
+use crate::keys;
+use crate::net;
 use crate::proto;
 use crate::utils;
-use crate::{keys, net};
+use crate::version;
 use anyhow::Context;
 use primitive_types::H256;
 use rand_core::{OsRng, RngCore};
@@ -27,9 +30,9 @@ pub struct NodeService {
 impl NodeService {
     fn get_protocol_version() -> dotakon::ProtocolVersion {
         dotakon::ProtocolVersion {
-            major: Some(1),
-            minor: Some(0),
-            build: Some(0),
+            major: Some(version::PROTOCOL_VERSION_MAJOR),
+            minor: Some(version::PROTOCOL_VERSION_MINOR),
+            build: Some(version::PROTOCOL_VERSION_BUILD),
         }
     }
 
@@ -58,6 +61,7 @@ impl NodeService {
     }
 
     pub fn new(
+        clock: Arc<dyn Clock>,
         key_manager: Arc<keys::KeyManager>,
         location: dotakon::GeographicalLocation,
         public_address: &str,
@@ -80,10 +84,13 @@ impl NodeService {
         Ok(Self {
             key_manager,
             identity,
-            db: db::Db::new(dotakon::NodeIdentity {
-                payload: Some(identity_payload),
-                signature: Some(identity_signature),
-            })?,
+            db: db::Db::new(
+                clock,
+                dotakon::NodeIdentity {
+                    payload: Some(identity_payload),
+                    signature: Some(identity_signature),
+                },
+            )?,
         })
     }
 
@@ -183,8 +190,12 @@ impl NodeServiceV1 for NodeService {
             block_hash: Some(proto::h256_to_bytes32(block_info.hash())),
             block_number: Some(block_info.number()),
             previous_block_hash: Some(proto::h256_to_bytes32(block_info.previous_block_hash())),
+            timestamp: Some(block_info.timestamp().into()),
             network_topology_root_hash: Some(proto::h256_to_bytes32(
                 block_info.network_topology_root_hash(),
+            )),
+            transactions_root_hash: Some(proto::h256_to_bytes32(
+                block_info.transactions_root_hash(),
             )),
             account_balances_root_hash: Some(proto::h256_to_bytes32(
                 block_info.account_balances_root_hash(),
@@ -254,6 +265,7 @@ impl NodeServiceV1 for NodeService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clock::MockClock;
     use crate::dotakon::{
         self, node_service_v1_client::NodeServiceV1Client,
         node_service_v1_server::NodeServiceV1Server,
@@ -265,6 +277,7 @@ mod tests {
     use tonic::transport::{Channel, Server};
 
     struct TestFixture {
+        clock: Arc<dyn Clock>,
         server_key_manager: Arc<keys::KeyManager>,
         client_key_manager: Arc<keys::KeyManager>,
         server_handle: JoinHandle<()>,
@@ -292,7 +305,10 @@ mod tests {
                     .unwrap(),
             );
 
+            let clock: Arc<dyn Clock> = Arc::new(MockClock::default());
+
             let service = NodeServiceV1Server::new(NodeService::new(
+                clock.clone(),
                 server_key_manager.clone(),
                 location,
                 "localhost",
@@ -331,6 +347,7 @@ mod tests {
             let client = NodeServiceV1Client::new(channel);
 
             Ok(Self {
+                clock,
                 server_key_manager,
                 client_key_manager,
                 server_handle,
@@ -345,6 +362,10 @@ mod tests {
             })
             .await
         }
+
+        pub fn clock(&self) -> &Arc<dyn Clock> {
+            &self.clock
+        }
     }
 
     impl Drop for TestFixture {
@@ -354,7 +375,7 @@ mod tests {
     }
 
     fn genesis_block_hash() -> H256 {
-        "0xa406a65a8e2f7afee90a4529e9c8669a0c78d31dab9e0e45def5ed1fd23f89ae"
+        "0xf8f5eca34e90e62c85bf4fe454a0ac9da67afcc3b37e8bf747bfe68f07c30744"
             .parse()
             .unwrap()
     }
@@ -377,9 +398,18 @@ mod tests {
         let payload = payload.to_msg::<dotakon::node_identity::Payload>().unwrap();
 
         let protocol_version = &payload.protocol_version.unwrap();
-        assert_eq!(protocol_version.major.unwrap(), 1);
-        assert_eq!(protocol_version.minor.unwrap(), 0);
-        assert_eq!(protocol_version.build.unwrap(), 0);
+        assert_eq!(
+            protocol_version.major.unwrap(),
+            version::PROTOCOL_VERSION_MAJOR
+        );
+        assert_eq!(
+            protocol_version.minor.unwrap(),
+            version::PROTOCOL_VERSION_MINOR
+        );
+        assert_eq!(
+            protocol_version.build.unwrap(),
+            version::PROTOCOL_VERSION_BUILD
+        );
 
         assert_eq!(
             proto::h256_from_bytes32(&payload.account_address.unwrap()),

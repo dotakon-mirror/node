@@ -25,6 +25,11 @@ impl prost::Name for dotakon::node_identity::Payload {
     const PACKAGE: &'static str = "dotakon";
 }
 
+impl prost::Name for dotakon::transaction::Payload {
+    const NAME: &'static str = "Transaction.Payload";
+    const PACKAGE: &'static str = "dotakon";
+}
+
 pub fn u256_to_bytes32(value: U256) -> dotakon::Bytes32 {
     let word_vec: Vec<u64> = value
         .to_little_endian()

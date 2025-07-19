@@ -1,21 +1,28 @@
+use crate::clock::Clock;
 use crate::dotakon;
 use crate::mpt;
 use crate::proto;
 use crate::topology;
+use crate::version;
 use anyhow::{Context, Result, anyhow};
 use primitive_types::{H256, U256};
 use sha3::{self, Digest};
 use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::time::SystemTime;
 
 pub const ACCOUNT_ADDRESS_KEY_LENGTH: usize = 32;
 pub const PROGRAM_STORAGE_KEY_LENGTH: usize = 40;
+pub const TRANSACTION_KEY_LENGTH: usize = 32;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct BlockInfo {
     hash: H256,
     number: u64,
     previous_block_hash: H256,
+    timestamp: SystemTime,
     network_topology_root_hash: H256,
+    transactions_root_hash: H256,
     account_balances_root_hash: H256,
     program_storage_root_hash: H256,
 }
@@ -24,17 +31,20 @@ impl BlockInfo {
     fn hash_block(
         block_number: u64,
         previous_block_hash: H256,
+        timestamp: SystemTime,
         network_topology_root_hash: H256,
+        transactions_root_hash: H256,
         account_balances_root_hash: H256,
         program_storage_root_hash: H256,
     ) -> H256 {
-        const DOMAIN_SEPARATOR: &str = "dotakon/block-hash-v1.0.0";
         let message = format!(
-            "{{domain=\"{}\",number={},previous={:#x},network={:#x},balances={:#x},programs={:#x}}}",
-            DOMAIN_SEPARATOR,
+            "{{domain=\"{}\",number={},previous={:#x},network={:#x},transactions={:#x},balances={:#x},programs={:#x}}}",
+            version::BLOCK_HASH_DOMAIN_SEPARATOR,
             block_number,
             previous_block_hash,
+            // TODO: add the timestamp.
             network_topology_root_hash,
+            transactions_root_hash,
             account_balances_root_hash,
             program_storage_root_hash,
         );
@@ -46,7 +56,9 @@ impl BlockInfo {
     fn new(
         block_number: u64,
         previous_block_hash: H256,
+        timestamp: SystemTime,
         network_topology_root_hash: H256,
+        transactions_root_hash: H256,
         account_balances_root_hash: H256,
         program_storage_root_hash: H256,
     ) -> Self {
@@ -54,13 +66,17 @@ impl BlockInfo {
             hash: Self::hash_block(
                 block_number,
                 previous_block_hash,
+                timestamp,
                 network_topology_root_hash,
+                transactions_root_hash,
                 account_balances_root_hash,
                 program_storage_root_hash,
             ),
             number: block_number,
             previous_block_hash,
+            timestamp,
             network_topology_root_hash,
+            transactions_root_hash,
             account_balances_root_hash,
             program_storage_root_hash,
         }
@@ -78,8 +94,16 @@ impl BlockInfo {
         self.previous_block_hash
     }
 
+    pub fn timestamp(&self) -> SystemTime {
+        self.timestamp
+    }
+
     pub fn network_topology_root_hash(&self) -> H256 {
         self.network_topology_root_hash
+    }
+
+    pub fn transactions_root_hash(&self) -> H256 {
+        self.transactions_root_hash
     }
 
     pub fn account_balances_root_hash(&self) -> H256 {
@@ -95,9 +119,11 @@ impl BlockInfo {
             block_hash: Some(proto::h256_to_bytes32(self.hash)),
             block_number: Some(self.number),
             previous_block_hash: Some(proto::h256_to_bytes32(self.previous_block_hash)),
+            timestamp: Some(self.timestamp.into()),
             network_topology_root_hash: Some(proto::h256_to_bytes32(
                 self.network_topology_root_hash,
             )),
+            transactions_root_hash: Some(proto::h256_to_bytes32(self.transactions_root_hash)),
             account_balances_root_hash: Some(proto::h256_to_bytes32(
                 self.account_balances_root_hash,
             )),
@@ -116,10 +142,19 @@ impl BlockInfo {
                 .previous_block_hash
                 .context("previous block hash field is missing")?,
         );
+        let timestamp: SystemTime = proto
+            .timestamp
+            .context("timestamp field is missing")?
+            .try_into()?;
         let network_topology_root_hash = proto::h256_from_bytes32(
             &proto
                 .network_topology_root_hash
                 .context("network topology root hash field is missing")?,
+        );
+        let transactions_root_hash = proto::h256_from_bytes32(
+            &proto
+                .transactions_root_hash
+                .context("transactions root hash field is missing")?,
         );
         let account_balances_root_hash = proto::h256_from_bytes32(
             &proto
@@ -134,7 +169,9 @@ impl BlockInfo {
         let block_info = Self::new(
             block_number,
             previous_block_hash,
+            timestamp,
             network_topology_root_hash,
+            transactions_root_hash,
             account_balances_root_hash,
             program_storage_root_hash,
         );
@@ -248,42 +285,78 @@ impl mpt::Sha3Hash for ProgramStorageValue {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct Transaction {
+    payload: prost_types::Any,
+    signature: dotakon::Signature,
+    decoded: dotakon::transaction::Payload,
+}
+
+impl Transaction {
+    pub fn new(proto: dotakon::Transaction) -> Result<Self> {
+        let payload = proto.payload.context("invalid transaction")?;
+        let decoded = payload.to_msg::<dotakon::transaction::Payload>()?;
+        let signature = proto.signature.context("the transaction is not signed")?;
+        Ok(Self {
+            payload,
+            signature,
+            decoded,
+        })
+    }
+}
+
+impl mpt::Sha3Hash for Transaction {
+    fn sha3_hash(&self) -> H256 {
+        todo!()
+    }
+}
+
 type AccountBalances = mpt::MPT<AccountBalance, ACCOUNT_ADDRESS_KEY_LENGTH>;
 pub type AccountBalanceProof = mpt::Proof<AccountBalance, ACCOUNT_ADDRESS_KEY_LENGTH>;
 
 type ProgramStorage = mpt::MPT<ProgramStorageValue, PROGRAM_STORAGE_KEY_LENGTH>;
 pub type ProgramStorageProof = mpt::Proof<ProgramStorageValue, PROGRAM_STORAGE_KEY_LENGTH>;
 
-fn make_genesis_block(network_topology_root_hash: H256) -> BlockInfo {
+type Transactions = mpt::MPT<Transaction, TRANSACTION_KEY_LENGTH>;
+pub type TransactionProof = mpt::Proof<Transaction, TRANSACTION_KEY_LENGTH>;
+
+fn make_genesis_block(timestamp: SystemTime, network_topology_root_hash: H256) -> BlockInfo {
     let block_number = 0;
     let previous_block_hash = H256::zero();
+    let transactions_root_hash = Transactions::new().root_hash(block_number);
     let account_balances_root_hash = AccountBalances::new().root_hash(block_number);
     let program_storage_root_hash = ProgramStorage::new().root_hash(block_number);
     BlockInfo::new(
         block_number,
         previous_block_hash,
+        timestamp,
         network_topology_root_hash,
+        transactions_root_hash,
         account_balances_root_hash,
         program_storage_root_hash,
     )
 }
 
 pub struct Db {
+    clock: Arc<dyn Clock>,
     blocks: Vec<BlockInfo>,
     block_numbers_by_hash: BTreeMap<H256, usize>,
     network_topologies: BTreeMap<u64, topology::Network>,
+    transactions: Transactions,
     account_balances: AccountBalances,
     program_storage: ProgramStorage,
 }
 
 impl Db {
-    pub fn new(identity: dotakon::NodeIdentity) -> Result<Self> {
+    pub fn new(clock: Arc<dyn Clock>, identity: dotakon::NodeIdentity) -> Result<Self> {
         let network = topology::Network::new(identity)?;
-        let genesis_block = make_genesis_block(network.root_hash());
+        let genesis_block = make_genesis_block(clock.now(), network.root_hash());
         Ok(Self {
+            clock,
             blocks: vec![genesis_block],
             block_numbers_by_hash: BTreeMap::from([(genesis_block.hash, 0)]),
             network_topologies: BTreeMap::from([(0, network)]),
+            transactions: Transactions::new(),
             account_balances: AccountBalances::new(),
             program_storage: ProgramStorage::new(),
         })
@@ -345,18 +418,24 @@ impl Db {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clock::MockClock;
     use crate::keys;
     use crate::mpt::{Proto, Sha3Hash};
     use crate::utils;
+    use std::time::Duration;
+
+    fn mock_clock(start_time: SystemTime) -> Arc<dyn Clock> {
+        Arc::new(MockClock::new(start_time))
+    }
 
     fn testing_identity() -> dotakon::NodeIdentity {
         let (secret_key, _, _) = utils::testing_keys1();
         let key_manager = keys::KeyManager::new(secret_key);
         let identity = dotakon::node_identity::Payload {
             protocol_version: Some(dotakon::ProtocolVersion {
-                major: Some(1),
-                minor: Some(0),
-                build: Some(0),
+                major: Some(version::PROTOCOL_VERSION_MAJOR),
+                minor: Some(version::PROTOCOL_VERSION_MINOR),
+                build: Some(version::PROTOCOL_VERSION_BUILD),
             }),
             account_address: Some(proto::h256_to_bytes32(key_manager.wallet_address())),
             location: Some(dotakon::GeographicalLocation {
@@ -384,7 +463,7 @@ mod tests {
     }
 
     fn genesis_block_hash() -> H256 {
-        "0xa406a65a8e2f7afee90a4529e9c8669a0c78d31dab9e0e45def5ed1fd23f89ae"
+        "0xf8f5eca34e90e62c85bf4fe454a0ac9da67afcc3b37e8bf747bfe68f07c30744"
             .parse()
             .unwrap()
     }
@@ -395,38 +474,50 @@ mod tests {
             1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
             24, 25, 26, 27, 28, 29, 30, 31, 32,
         ]);
+        let timestamp = SystemTime::UNIX_EPOCH + Duration::from_secs(71104);
         let network_topology_root_hash = H256::from_slice(&[
             8u8, 7, 6, 5, 4, 3, 2, 1, 16, 15, 14, 13, 12, 11, 10, 9, 24, 23, 22, 21, 20, 19, 18,
             17, 32, 31, 30, 29, 28, 27, 26, 25,
         ]);
-        let account_balances_root_hash = H256::from_slice(&[
+        let transactions_root_hash = H256::from_slice(&[
             32u8, 31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14, 13, 12,
             11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1,
         ]);
-        let program_storage_root_hash = H256::from_slice(&[
+        let account_balances_root_hash = H256::from_slice(&[
             25u8, 26, 27, 28, 29, 30, 31, 32, 17, 18, 19, 20, 21, 22, 23, 24, 9, 10, 11, 12, 13,
             14, 15, 16, 1, 2, 3, 4, 5, 6, 7, 8,
+        ]);
+        let program_storage_root_hash = H256::from_slice(&[
+            2u8, 1, 4, 3, 6, 5, 8, 7, 10, 9, 12, 11, 14, 13, 16, 15, 18, 17, 20, 19, 22, 21, 24,
+            23, 26, 25, 28, 27, 30, 29, 32, 31,
         ]);
         let block = BlockInfo::new(
             42,
             previous_block_hash,
+            timestamp,
             network_topology_root_hash,
+            transactions_root_hash,
             account_balances_root_hash,
             program_storage_root_hash,
         );
-        assert_ne!(block, make_genesis_block(network_topology_root_hash));
+        assert_ne!(
+            block,
+            make_genesis_block(timestamp, network_topology_root_hash)
+        );
         assert_eq!(
             block.hash(),
-            "0x37959258fb26fc163a10b581c8a4921ccba08b6982a4710784d6722824aa062b"
+            "0xe00da0dfba03e1f2258c7f05f422e2593664602c76f40bd142c4ec30d01efc9f"
                 .parse()
                 .unwrap()
         );
         assert_eq!(block.number(), 42);
         assert_eq!(block.previous_block_hash(), previous_block_hash);
+        assert_eq!(block.timestamp(), timestamp);
         assert_eq!(
             block.network_topology_root_hash(),
             network_topology_root_hash
         );
+        assert_eq!(block.transactions_root_hash(), transactions_root_hash);
         assert_eq!(
             block.account_balances_root_hash(),
             account_balances_root_hash
@@ -437,12 +528,20 @@ mod tests {
 
     #[test]
     fn test_genesis_block() {
+        let timestamp = SystemTime::UNIX_EPOCH + Duration::from_secs(71104);
         let network = topology::Network::new(testing_identity()).unwrap();
-        let block = make_genesis_block(network.root_hash());
+        let block = make_genesis_block(timestamp, network.root_hash());
         assert_eq!(block.hash(), genesis_block_hash());
         assert_eq!(block.number(), 0);
         assert_eq!(block.previous_block_hash(), H256::zero());
+        assert_eq!(block.timestamp(), timestamp);
         assert_eq!(block.network_topology_root_hash(), network.root_hash());
+        assert_eq!(
+            block.transactions_root_hash(),
+            "0xb4a3716bd9261f312ea71656dda4caa0d694f0f6816712036ee8fce833e4b46f"
+                .parse()
+                .unwrap()
+        );
         assert_eq!(
             block.account_balances_root_hash(),
             "0xb4a3716bd9261f312ea71656dda4caa0d694f0f6816712036ee8fce833e4b46f"
@@ -482,7 +581,8 @@ mod tests {
 
     #[test]
     fn test_initial_state() {
-        let db = Db::new(testing_identity()).unwrap();
+        let clock = mock_clock(SystemTime::UNIX_EPOCH);
+        let db = Db::new(clock, testing_identity()).unwrap();
         assert_eq!(db.current_version(), 1);
         let genesis_block_hash = genesis_block_hash();
         assert_eq!(
@@ -497,7 +597,8 @@ mod tests {
     }
 
     fn test_initial_balance(public_key: H256) {
-        let db = Db::new(testing_identity()).unwrap();
+        let clock = mock_clock(SystemTime::UNIX_EPOCH);
+        let db = Db::new(clock, testing_identity()).unwrap();
         let account_address = utils::public_key_to_wallet_address(public_key);
         let (block, proof) = db.get_latest_balance(account_address).unwrap();
         assert_eq!(block.hash(), genesis_block_hash());
@@ -518,7 +619,8 @@ mod tests {
     }
 
     fn test_balance_at_first_block(public_key: H256) {
-        let db = Db::new(testing_identity()).unwrap();
+        let clock = mock_clock(SystemTime::UNIX_EPOCH);
+        let db = Db::new(clock, testing_identity()).unwrap();
         let account_address = utils::public_key_to_wallet_address(public_key);
         let (block, proof) = db
             .get_balance(account_address, genesis_block_hash())

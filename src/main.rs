@@ -6,6 +6,7 @@ use rand_core::{OsRng, RngCore};
 use std::sync::Arc;
 use tonic::transport::Server;
 
+mod clock;
 mod db;
 mod keys;
 mod mpt;
@@ -15,6 +16,7 @@ mod service;
 mod ssl;
 mod topology;
 mod utils;
+mod version;
 
 #[cfg(test)]
 mod fake;
@@ -108,6 +110,7 @@ async fn main() -> Result<()> {
     let location = make_location(args.latitude, args.longitude)?;
     let server =
         Server::builder().add_service(NodeServiceV1Server::new(service::NodeService::new(
+            Arc::new(clock::RealClock::default()),
             key_manager.clone(),
             location,
             args.public_address.as_str(),
