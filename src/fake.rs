@@ -36,6 +36,16 @@ impl NodeServiceV1 for FakeNodeService {
         Ok(Response::new(dotakon::NetworkTopology { cluster: vec![] }))
     }
 
+    async fn get_transaction(
+        &self,
+        _request: Request<dotakon::GetTransactionRequest>,
+    ) -> Result<Response<dotakon::GetTransactionResponse>, Status> {
+        Ok(Response::new(dotakon::GetTransactionResponse {
+            payload: None,
+            signature: None,
+        }))
+    }
+
     async fn get_account_balance(
         &self,
         _request: Request<dotakon::GetAccountBalanceRequest>,

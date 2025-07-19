@@ -1066,7 +1066,9 @@ mod tests {
                 block_hash: None,
                 block_number: None,
                 previous_block_hash: None,
+                timestamp: None,
                 network_topology_root_hash: None,
+                last_transaction_hash: None,
                 account_balances_root_hash: Some(proto::h256_to_bytes32(mpt.root_hash(0))),
                 program_storage_root_hash: None,
             })
@@ -1095,7 +1097,9 @@ mod tests {
                 block_hash: None,
                 block_number: None,
                 previous_block_hash: None,
+                timestamp: None,
                 network_topology_root_hash: None,
+                last_transaction_hash: None,
                 account_balances_root_hash: Some(proto::h256_to_bytes32(mpt.root_hash(0))),
                 program_storage_root_hash: None,
             })
@@ -1125,7 +1129,9 @@ mod tests {
                 block_hash: None,
                 block_number: None,
                 previous_block_hash: None,
+                timestamp: None,
                 network_topology_root_hash: None,
+                last_transaction_hash: None,
                 account_balances_root_hash: Some(proto::h256_to_bytes32(mpt.root_hash(0))),
                 program_storage_root_hash: None,
             })
@@ -1155,7 +1161,9 @@ mod tests {
                 block_hash: None,
                 block_number: None,
                 previous_block_hash: None,
+                timestamp: None,
                 network_topology_root_hash: None,
+                last_transaction_hash: None,
                 account_balances_root_hash: Some(proto::h256_to_bytes32(mpt.root_hash(0))),
                 program_storage_root_hash: None,
             })
@@ -1185,7 +1193,9 @@ mod tests {
                 block_hash: None,
                 block_number: None,
                 previous_block_hash: None,
+                timestamp: None,
                 network_topology_root_hash: None,
+                last_transaction_hash: None,
                 account_balances_root_hash: Some(proto::h256_to_bytes32(mpt.root_hash(0))),
                 program_storage_root_hash: None,
             })
@@ -1212,7 +1222,9 @@ mod tests {
                 block_hash: None,
                 block_number: None,
                 previous_block_hash: None,
+                timestamp: None,
                 network_topology_root_hash: None,
+                last_transaction_hash: None,
                 account_balances_root_hash: Some(proto::h256_to_bytes32(mpt.root_hash(0))),
                 program_storage_root_hash: None,
             })

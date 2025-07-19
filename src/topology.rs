@@ -160,6 +160,8 @@ impl Cluster {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Network {
     clusters: Vec<Cluster>,
+    own_cluster_index: usize,
+    own_node_index: usize,
     hash: H256,
 }
 
@@ -183,11 +185,20 @@ impl Network {
     pub fn new(identity: dotakon::NodeIdentity) -> Result<Self> {
         let clusters = vec![Cluster::from([Node::new(identity)?])?];
         let hash = Self::hash_network(clusters.as_slice());
-        Ok(Self { clusters, hash })
+        Ok(Self {
+            clusters,
+            own_cluster_index: 0,
+            own_node_index: 0,
+            hash,
+        })
     }
 
     pub fn root_hash(&self) -> H256 {
         self.hash
+    }
+
+    pub async fn broadcast_transaction(&self, transaction: &dotakon::Transaction) -> Result<()> {
+        todo!()
     }
 }
 
@@ -197,8 +208,7 @@ mod tests {
     use crate::keys;
     use crate::utils;
 
-    #[test]
-    fn test_node() {
+    fn testing_identity() -> (keys::KeyManager, dotakon::NodeIdentity) {
         let (secret_key, _, _) = utils::testing_keys1();
         let key_manager = keys::KeyManager::new(secret_key);
         let identity = dotakon::node_identity::Payload {
@@ -226,10 +236,18 @@ mod tests {
                 ]),
             )
             .unwrap();
-        let identity = dotakon::NodeIdentity {
-            payload: Some(payload),
-            signature: Some(signature),
-        };
+        (
+            key_manager,
+            dotakon::NodeIdentity {
+                payload: Some(payload),
+                signature: Some(signature),
+            },
+        )
+    }
+
+    #[test]
+    fn test_node() {
+        let (key_manager, identity) = testing_identity();
         let node = Node::new(identity.clone()).unwrap();
         assert_eq!(node.account_address(), key_manager.wallet_address());
         assert_eq!(node.hash(), key_manager.wallet_address());
@@ -239,6 +257,20 @@ mod tests {
         assert_eq!(node.network_address(), "localhost");
         assert_eq!(node.grpc_port(), 4443);
         assert_eq!(node.http_port(), 8080);
+    }
+
+    #[test]
+    fn test_new_network() {
+        let (_, identity) = testing_identity();
+        let network = Network::new(identity).unwrap();
+        assert_eq!(network.own_cluster_index, 0);
+        assert_eq!(network.own_node_index, 0);
+        assert_eq!(
+            network.root_hash(),
+            "0x08c02c5001b9b0780aa3466891c1b28285d897429aba44692165a5ac6f5f89ec"
+                .parse()
+                .unwrap()
+        );
     }
 
     // TODO

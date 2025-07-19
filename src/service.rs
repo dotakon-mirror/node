@@ -1,8 +1,11 @@
+use crate::clock::Clock;
 use crate::db;
 use crate::dotakon::{self, node_service_v1_server::NodeServiceV1};
+use crate::keys;
+use crate::net;
 use crate::proto;
 use crate::utils;
-use crate::{keys, net};
+use crate::version;
 use anyhow::Context;
 use primitive_types::H256;
 use rand_core::{OsRng, RngCore};
@@ -27,9 +30,9 @@ pub struct NodeService {
 impl NodeService {
     fn get_protocol_version() -> dotakon::ProtocolVersion {
         dotakon::ProtocolVersion {
-            major: Some(1),
-            minor: Some(0),
-            build: Some(0),
+            major: Some(version::PROTOCOL_VERSION_MAJOR),
+            minor: Some(version::PROTOCOL_VERSION_MINOR),
+            build: Some(version::PROTOCOL_VERSION_BUILD),
         }
     }
 
@@ -58,6 +61,7 @@ impl NodeService {
     }
 
     pub fn new(
+        clock: Arc<dyn Clock>,
         key_manager: Arc<keys::KeyManager>,
         location: dotakon::GeographicalLocation,
         public_address: &str,
@@ -80,10 +84,13 @@ impl NodeService {
         Ok(Self {
             key_manager,
             identity,
-            db: db::Db::new(dotakon::NodeIdentity {
-                payload: Some(identity_payload),
-                signature: Some(identity_signature),
-            })?,
+            db: db::Db::new(
+                clock,
+                dotakon::NodeIdentity {
+                    payload: Some(identity_payload),
+                    signature: Some(identity_signature),
+                },
+            )?,
         })
     }
 
@@ -183,9 +190,11 @@ impl NodeServiceV1 for NodeService {
             block_hash: Some(proto::h256_to_bytes32(block_info.hash())),
             block_number: Some(block_info.number()),
             previous_block_hash: Some(proto::h256_to_bytes32(block_info.previous_block_hash())),
+            timestamp: Some(block_info.timestamp().into()),
             network_topology_root_hash: Some(proto::h256_to_bytes32(
                 block_info.network_topology_root_hash(),
             )),
+            last_transaction_hash: Some(proto::h256_to_bytes32(block_info.last_transaction_hash())),
             account_balances_root_hash: Some(proto::h256_to_bytes32(
                 block_info.account_balances_root_hash(),
             )),
@@ -207,6 +216,40 @@ impl NodeServiceV1 for NodeService {
         _request: Request<dotakon::GetTopologyRequest>,
     ) -> Result<Response<dotakon::NetworkTopology>, Status> {
         todo!()
+    }
+
+    async fn get_transaction(
+        &self,
+        request: Request<dotakon::GetTransactionRequest>,
+    ) -> Result<Response<dotakon::GetTransactionResponse>, Status> {
+        let transaction_hash = match request.get_ref().transaction_hash {
+            Some(hash) => proto::h256_from_bytes32(&hash),
+            None => return Err(Status::invalid_argument("transaction hash field missing")),
+        };
+        match self.db.get_transaction(transaction_hash) {
+            Some(transaction) => {
+                let (payload, signature) = self
+                    .key_manager
+                    .sign_message(
+                        &dotakon::BoundTransaction {
+                            parent_transaction_hash: Some(proto::h256_to_bytes32(
+                                transaction.parent_hash(),
+                            )),
+                            transaction: Some(transaction.diff()),
+                        },
+                        get_random(),
+                    )
+                    .map_err(|_| Status::internal("internal error"))?;
+                Ok(Response::new(dotakon::GetTransactionResponse {
+                    payload: Some(payload),
+                    signature: Some(signature),
+                }))
+            }
+            None => Err(Status::not_found(format!(
+                "transaction hash {:#x} not found",
+                transaction_hash
+            ))),
+        }
     }
 
     async fn get_account_balance(
@@ -254,17 +297,20 @@ impl NodeServiceV1 for NodeService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clock::test::MockClock;
     use crate::dotakon::{
         self, node_service_v1_client::NodeServiceV1Client,
         node_service_v1_server::NodeServiceV1Server,
     };
     use crate::ssl;
     use primitive_types::H256;
+    use std::time::Duration;
     use tokio::sync::Notify;
     use tokio::task::JoinHandle;
     use tonic::transport::{Channel, Server};
 
     struct TestFixture {
+        clock: Arc<dyn Clock>,
         server_key_manager: Arc<keys::KeyManager>,
         client_key_manager: Arc<keys::KeyManager>,
         server_handle: JoinHandle<()>,
@@ -292,7 +338,12 @@ mod tests {
                     .unwrap(),
             );
 
+            let clock: Arc<dyn Clock> = Arc::new(MockClock::new(
+                SystemTime::UNIX_EPOCH + Duration::from_secs(71104),
+            ));
+
             let service = NodeServiceV1Server::new(NodeService::new(
+                clock.clone(),
                 server_key_manager.clone(),
                 location,
                 "localhost",
@@ -331,6 +382,7 @@ mod tests {
             let client = NodeServiceV1Client::new(channel);
 
             Ok(Self {
+                clock,
                 server_key_manager,
                 client_key_manager,
                 server_handle,
@@ -345,6 +397,10 @@ mod tests {
             })
             .await
         }
+
+        pub fn clock(&self) -> &Arc<dyn Clock> {
+            &self.clock
+        }
     }
 
     impl Drop for TestFixture {
@@ -354,7 +410,7 @@ mod tests {
     }
 
     fn genesis_block_hash() -> H256 {
-        "0xa406a65a8e2f7afee90a4529e9c8669a0c78d31dab9e0e45def5ed1fd23f89ae"
+        "0x06cd735786d99bb1263b40ef8a7409a9631e403de0032aa90a85f8c319ca8530"
             .parse()
             .unwrap()
     }
@@ -377,9 +433,18 @@ mod tests {
         let payload = payload.to_msg::<dotakon::node_identity::Payload>().unwrap();
 
         let protocol_version = &payload.protocol_version.unwrap();
-        assert_eq!(protocol_version.major.unwrap(), 1);
-        assert_eq!(protocol_version.minor.unwrap(), 0);
-        assert_eq!(protocol_version.build.unwrap(), 0);
+        assert_eq!(
+            protocol_version.major.unwrap(),
+            version::PROTOCOL_VERSION_MAJOR
+        );
+        assert_eq!(
+            protocol_version.minor.unwrap(),
+            version::PROTOCOL_VERSION_MINOR
+        );
+        assert_eq!(
+            protocol_version.build.unwrap(),
+            version::PROTOCOL_VERSION_BUILD
+        );
 
         assert_eq!(
             proto::h256_from_bytes32(&payload.account_address.unwrap()),
@@ -613,6 +678,34 @@ mod tests {
                 .get_account_balance(dotakon::GetAccountBalanceRequest {
                     account_address: None,
                     block_hash: None,
+                })
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_invalid_transaction_lookup() {
+        let mut fixture = TestFixture::with_default_location().await.unwrap();
+        let client = &mut fixture.client;
+        assert!(
+            client
+                .get_transaction(dotakon::GetTransactionRequest {
+                    transaction_hash: None,
+                })
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_unknown_transaction() {
+        let mut fixture = TestFixture::with_default_location().await.unwrap();
+        let client = &mut fixture.client;
+        assert!(
+            client
+                .get_transaction(dotakon::GetTransactionRequest {
+                    transaction_hash: Some(proto::h256_to_bytes32(H256::zero())),
                 })
                 .await
                 .is_err()
