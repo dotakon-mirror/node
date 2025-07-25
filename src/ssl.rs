@@ -1,16 +1,13 @@
-use anyhow::{self, Context};
-use ed25519_dalek::{self, Verifier};
-use pasta_curves::{group::GroupEncoding, pallas::Point as PointPallas};
+use crate::keys;
+use crate::utils;
+use anyhow::Context;
+use ed25519_dalek::Verifier;
+use pasta_curves::pallas::Point as PointPallas;
 use primitive_types::H256;
-use rustls::{
-    SignatureScheme, client::danger::ServerCertVerifier, server::danger::ClientCertVerifier,
-};
+use rustls::{client::danger::ServerCertVerifier, server::danger::ClientCertVerifier};
 use std::sync::Arc;
 use time::{Duration, OffsetDateTime};
 use x509_parser::{self, certificate::X509Certificate};
-
-use crate::keys;
-use crate::utils;
 
 pub fn generate_certificate(
     key_manager: Arc<keys::KeyManager>,
@@ -43,7 +40,10 @@ pub fn generate_certificate(
         .custom_extensions
         .push(rcgen::CustomExtension::from_oid_content(
             public_key_oid.as_slice(),
-            key_manager.public_key().to_fixed_bytes().to_vec(),
+            key_manager
+                .compressed_public_key()
+                .to_fixed_bytes()
+                .to_vec(),
         ));
 
     let signature = key_manager.prove_public_key_identity(secret_nonce);
@@ -80,7 +80,16 @@ pub fn recover_c25519_public_key(certificate: &X509Certificate) -> Result<H256, 
         // "unknown".
         x509_parser::public_key::PublicKey::Unknown(bytes) => Ok(bytes),
         _ => Err(rustls::Error::InvalidCertificate(
-            rustls::CertificateError::UnsupportedSignatureAlgorithm,
+            rustls::CertificateError::UnsupportedSignatureAlgorithmContext {
+                signature_algorithm_id: certificate
+                    .tbs_certificate
+                    .subject_pki
+                    .algorithm
+                    .algorithm
+                    .as_bytes()
+                    .to_vec(),
+                supported_algorithms: vec![rustls::pki_types::alg_id::ED25519],
+            },
         )),
     }?;
     if bytes.len() != 32 {
@@ -91,7 +100,9 @@ pub fn recover_c25519_public_key(certificate: &X509Certificate) -> Result<H256, 
     Ok(H256::from_slice(bytes))
 }
 
-pub fn recover_pallas_public_key(certificate: &X509Certificate) -> Result<H256, rustls::Error> {
+pub fn recover_pallas_public_key(
+    certificate: &X509Certificate,
+) -> Result<PointPallas, rustls::Error> {
     let extensions = certificate.extensions_map().map_err(|_| {
         rustls::Error::General("public Pallas key not found in X.509 certificate".into())
     })?;
@@ -106,7 +117,8 @@ pub fn recover_pallas_public_key(certificate: &X509Certificate) -> Result<H256, 
     }
     let mut bytes = [0u8; 32];
     bytes.copy_from_slice(extension.value);
-    Ok(H256::from_slice(&bytes))
+    utils::decompress_point_pallas(H256::from_slice(&bytes))
+        .map_err(|_| rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding))
 }
 
 #[derive(Debug, Clone)]
@@ -162,14 +174,7 @@ impl CertificateVerifier {
                 rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding)
             })?;
 
-        let public_key_pallas = recover_pallas_public_key(&certificate)?;
-        let public_key_point_pallas =
-            match PointPallas::from_bytes(&public_key_pallas.to_fixed_bytes()).into_option() {
-                Some(point) => Ok(point),
-                None => Err(rustls::Error::InvalidCertificate(
-                    rustls::CertificateError::BadEncoding,
-                )),
-            }?;
+        let public_key_point_pallas = recover_pallas_public_key(&certificate)?;
 
         let signature = Self::recover_identity_signature(&certificate)?;
 
@@ -189,9 +194,13 @@ impl CertificateVerifier {
         certificate: &rustls::pki_types::CertificateDer<'_>,
         dss: &rustls::DigitallySignedStruct,
     ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        if dss.scheme != SignatureScheme::ED25519 {
+        if dss.scheme != rustls::SignatureScheme::ED25519 {
             return Err(rustls::Error::InvalidCertificate(
-                rustls::CertificateError::UnsupportedSignatureAlgorithm,
+                rustls::CertificateError::UnsupportedSignatureAlgorithmContext {
+                    // TODO: convert dss.scheme to the corresponding OID.
+                    signature_algorithm_id: vec![],
+                    supported_algorithms: vec![rustls::pki_types::alg_id::ED25519],
+                },
             ));
         }
 
@@ -336,7 +345,7 @@ impl ServerCertVerifier for DotakonServerCertVerifier {
             .verify_tls_signature(message, certificate, dss)
     }
 
-    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
         vec![rustls::SignatureScheme::ED25519]
     }
 
@@ -353,8 +362,6 @@ impl ServerCertVerifier for DotakonServerCertVerifier {
 mod tests {
     use super::*;
     use anyhow::anyhow;
-    use oid_registry;
-    use rustls::CommonState;
     use tokio::{
         self,
         io::{AsyncReadExt, AsyncWriteExt},
@@ -363,6 +370,7 @@ mod tests {
     #[test]
     fn test_certificate_generation() {
         let (secret_key, public_key_pallas, public_key_25519) = utils::testing_keys1();
+        let public_key_25519 = utils::compress_point_c25519(&public_key_25519);
         let key_manager = Arc::new(keys::KeyManager::new(secret_key));
         let nonce = H256::from_slice(&[
             1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
@@ -405,7 +413,9 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .value,
-            public_key_pallas.to_fixed_bytes().as_slice()
+            utils::compress_point_pallas(&public_key_pallas)
+                .to_fixed_bytes()
+                .as_slice()
         );
         let identity_signature_extension = parsed
             .get_extension_unique(&utils::OID_DOTAKON_IDENTITY_SIGNATURE_DUAL_SCHNORR)
@@ -414,8 +424,8 @@ mod tests {
         let mut signature_bytes = [0u8; 128];
         signature_bytes.copy_from_slice(identity_signature_extension.value);
         keys::KeyManager::verify_public_key_identity(
-            &utils::decompress_point_pallas(key_manager.public_key()).unwrap(),
-            &utils::decompress_point_c25519(key_manager.public_key_25519()).unwrap(),
+            &key_manager.public_key(),
+            &key_manager.public_key_25519(),
             &utils::DualSchnorrSignature::decode(&signature_bytes).unwrap(),
         )
         .unwrap();
@@ -434,7 +444,7 @@ mod tests {
             x509_parser::parse_x509_certificate(certificate.der()).unwrap();
         assert_eq!(
             recover_c25519_public_key(&parsed_certificate).unwrap(),
-            key_manager.public_key_25519()
+            key_manager.compressed_public_key_25519()
         );
         assert_eq!(
             recover_pallas_public_key(&parsed_certificate).unwrap(),
@@ -576,7 +586,7 @@ mod tests {
     }
 
     fn check_peer(
-        connection: &CommonState,
+        connection: &rustls::CommonState,
         peer_keys: Arc<keys::KeyManager>,
     ) -> anyhow::Result<()> {
         let certificates = connection
@@ -590,8 +600,8 @@ mod tests {
         }
         let (_, parsed_certificate) = x509_parser::parse_x509_certificate(&certificates[0])?;
         let public_key_25519 = recover_c25519_public_key(&parsed_certificate)?;
-        if public_key_25519 != peer_keys.public_key_25519() {
-            return Err(anyhow!("the c25519 public key doesn't match"));
+        if public_key_25519 != peer_keys.compressed_public_key_25519() {
+            return Err(anyhow!("the Ed25519 public key doesn't match"));
         }
         let public_key_pallas = recover_pallas_public_key(&parsed_certificate)?;
         if public_key_pallas != peer_keys.public_key() {

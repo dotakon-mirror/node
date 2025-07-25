@@ -1,5 +1,8 @@
-use crate::{dotakon, proto};
+use crate::dotakon;
+use crate::proto;
+use crate::utils;
 use anyhow::{Context, Result, anyhow};
+use pasta_curves::pallas::Scalar;
 use primitive_types::H256;
 use sha3::{self, Digest};
 use std::collections::BTreeSet;
@@ -12,7 +15,7 @@ pub struct Location {
 
 #[derive(Debug, Clone)]
 pub struct Node {
-    account_address: H256,
+    account_address: Scalar,
     signed_identity: dotakon::NodeIdentity,
     location: Location,
     network_address: String,
@@ -35,11 +38,11 @@ impl Node {
             .as_ref()
             .context("payload missing")?
             .to_msg::<dotakon::node_identity::Payload>()?;
-        let account_address = proto::h256_from_bytes32(
+        let account_address = proto::pallas_scalar_from_bytes32(
             &payload
                 .account_address
                 .context("account address field missing")?,
-        );
+        )?;
         let location = payload
             .location
             .context("geographical location field missing")?;
@@ -67,11 +70,11 @@ impl Node {
         })
     }
 
-    pub fn account_address(&self) -> H256 {
+    pub fn account_address(&self) -> Scalar {
         self.account_address
     }
 
-    pub fn hash(&self) -> H256 {
+    pub fn hash(&self) -> Scalar {
         self.account_address
     }
 
@@ -117,17 +120,17 @@ impl Ord for Node {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Cluster {
+struct Clique {
     nodes: Vec<Node>,
     hash: H256,
 }
 
-impl Cluster {
+impl Clique {
     fn hash_nodes(nodes: &[Node]) -> H256 {
-        const DOMAIN_SEPARATOR: &str = "dotakon/topology-hash-v1/cluster";
+        const DOMAIN_SEPARATOR: &str = "dotakon/topology-hash-v1/clique";
         let node_hashes: Vec<String> = nodes
             .iter()
-            .map(|node| format!("{:#x}", node.hash()))
+            .map(|node| format!("{:#x}", utils::pallas_scalar_to_u256(node.hash())))
             .collect();
         let message = format!(
             "{{domain=\"{}\",nodes=[{}]}}",
@@ -159,41 +162,41 @@ impl Cluster {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Network {
-    clusters: Vec<Cluster>,
-    own_cluster_index: usize,
+    cliques: Vec<Clique>,
+    own_clique_index: usize,
     own_node_index: usize,
-    hash: H256,
+    hash: Scalar,
 }
 
 impl Network {
-    fn hash_network(clusters: &[Cluster]) -> H256 {
+    fn hash_network(cliques: &[Clique]) -> Scalar {
         const DOMAIN_SEPARATOR: &str = "dotakon/topology-hash-v1/network";
-        let cluster_hashes: Vec<String> = clusters
+        let clique_hashes: Vec<String> = cliques
             .iter()
-            .map(|cluster| format!("{:#x}", cluster.hash()))
+            .map(|clique| format!("{:#x}", clique.hash()))
             .collect();
         let message = format!(
-            "{{domain=\"{}\",clusters=[{}]}}",
+            "{{domain=\"{}\",cliques=[{}]}}",
             DOMAIN_SEPARATOR,
-            cluster_hashes.join(",")
+            clique_hashes.join(",")
         );
         let mut hasher = sha3::Sha3_256::new();
         hasher.update(message.as_bytes());
-        H256::from_slice(hasher.finalize().as_slice())
+        utils::hash_to_pallas_scalar(H256::from_slice(hasher.finalize().as_slice()))
     }
 
     pub fn new(identity: dotakon::NodeIdentity) -> Result<Self> {
-        let clusters = vec![Cluster::from([Node::new(identity)?])?];
-        let hash = Self::hash_network(clusters.as_slice());
+        let cliques = vec![Clique::from([Node::new(identity)?])?];
+        let hash = Self::hash_network(cliques.as_slice());
         Ok(Self {
-            clusters,
-            own_cluster_index: 0,
+            cliques,
+            own_clique_index: 0,
             own_node_index: 0,
             hash,
         })
     }
 
-    pub fn root_hash(&self) -> H256 {
+    pub fn root_hash(&self) -> Scalar {
         self.hash
     }
 
@@ -207,6 +210,7 @@ mod tests {
     use super::*;
     use crate::keys;
     use crate::utils;
+    use primitive_types::H256;
 
     fn testing_identity() -> (keys::KeyManager, dotakon::NodeIdentity) {
         let (secret_key, _, _) = utils::testing_keys1();
@@ -217,7 +221,9 @@ mod tests {
                 minor: Some(0),
                 build: Some(0),
             }),
-            account_address: Some(proto::h256_to_bytes32(key_manager.wallet_address())),
+            account_address: Some(proto::pallas_scalar_to_bytes32(
+                key_manager.wallet_address(),
+            )),
             location: Some(dotakon::GeographicalLocation {
                 latitude: Some(71),
                 longitude: Some(104),
@@ -263,13 +269,13 @@ mod tests {
     fn test_new_network() {
         let (_, identity) = testing_identity();
         let network = Network::new(identity).unwrap();
-        assert_eq!(network.own_cluster_index, 0);
+        assert_eq!(network.own_clique_index, 0);
         assert_eq!(network.own_node_index, 0);
         assert_eq!(
             network.root_hash(),
-            "0x08c02c5001b9b0780aa3466891c1b28285d897429aba44692165a5ac6f5f89ec"
-                .parse()
-                .unwrap()
+            utils::parse_pallas_scalar(
+                "0x3f75bfd1de06f77cce4d43d38ffac77eac6a8de697cf3b2a798bc19f1cb1c2b2"
+            )
         );
     }
 

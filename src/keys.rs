@@ -3,11 +3,12 @@ use crate::proto;
 use crate::utils;
 use anyhow::{Context, Result, anyhow};
 use base64::{Engine, prelude::BASE64_STANDARD};
-use curve25519_dalek::{EdwardsPoint as Point25519, scalar::Scalar as Scalar25519};
+use curve25519_dalek::{EdwardsPoint as Point25519, Scalar as Scalar25519};
 use ed25519_dalek::{self, ed25519::signature::SignerMut, pkcs8::EncodePrivateKey};
 use pasta_curves::{
-    arithmetic::CurveExt, group::Group, pallas::Point as PointPallas,
-    pallas::Scalar as ScalarPallas,
+    arithmetic::CurveExt,
+    group::Group,
+    pallas::{Point as PointPallas, Scalar as ScalarPallas},
 };
 use primitive_types::H256;
 use sha3::{self, Digest};
@@ -22,7 +23,7 @@ pub struct RemoteEd25519KeyPair<R: Deref<Target = KeyManager>> {
 
 impl<R: Deref<Target = KeyManager>> From<R> for RemoteEd25519KeyPair<R> {
     fn from(key_manager: R) -> Self {
-        let public_key_cache = key_manager.public_key_25519.to_fixed_bytes();
+        let public_key_cache = key_manager.compressed_public_key_25519().to_fixed_bytes();
         Self {
             parent: key_manager,
             public_key_cache,
@@ -48,11 +49,9 @@ impl<R: Deref<Target = KeyManager>> rcgen::RemoteKeyPair for RemoteEd25519KeyPai
 pub struct KeyManager {
     ed25519_signing_key: Mutex<ed25519_dalek::SigningKey>,
     private_key: Scalar25519,
-    public_key_point_pallas: PointPallas,
-    public_key_pallas: H256,
-    public_key_point_25519: Point25519,
-    public_key_25519: H256,
-    wallet_address: H256,
+    public_key_pallas: PointPallas,
+    public_key_25519: Point25519,
+    wallet_address: ScalarPallas,
 }
 
 impl KeyManager {
@@ -66,18 +65,13 @@ impl KeyManager {
         let private_key_25519 = ed25519_signing_key.to_scalar();
         let private_key_pallas = utils::c25519_scalar_to_pallas_scalar(private_key_25519);
 
-        let public_key_point_pallas = PointPallas::generator() * private_key_pallas;
-        let public_key_pallas = utils::compress_point_pallas(&public_key_point_pallas);
-
-        let public_key_point_25519 = Point25519::mul_base(&private_key_25519);
-        let public_key_25519 = utils::compress_point_c25519(&public_key_point_25519);
+        let public_key_pallas = PointPallas::generator() * private_key_pallas;
+        let public_key_25519 = Point25519::mul_base(&private_key_25519);
 
         Self {
             ed25519_signing_key: Mutex::new(ed25519_signing_key),
             private_key: private_key_25519,
-            public_key_point_pallas,
             public_key_pallas,
-            public_key_point_25519,
             public_key_25519,
             wallet_address: utils::public_key_to_wallet_address(public_key_pallas),
         }
@@ -88,15 +82,23 @@ impl KeyManager {
         Ok(signing_key.to_pkcs8_der()?.as_bytes().to_vec())
     }
 
-    pub fn public_key(&self) -> H256 {
+    pub fn public_key(&self) -> PointPallas {
         self.public_key_pallas
     }
 
-    pub fn public_key_25519(&self) -> H256 {
+    pub fn compressed_public_key(&self) -> H256 {
+        utils::compress_point_pallas(&self.public_key_pallas)
+    }
+
+    pub fn public_key_25519(&self) -> Point25519 {
         self.public_key_25519
     }
 
-    pub fn wallet_address(&self) -> H256 {
+    pub fn compressed_public_key_25519(&self) -> H256 {
+        utils::compress_point_c25519(&self.public_key_25519)
+    }
+
+    pub fn wallet_address(&self) -> ScalarPallas {
         self.wallet_address
     }
 
@@ -118,7 +120,7 @@ impl KeyManager {
     }
 
     fn make_own_signature_challenge(&self, nonce: &PointPallas, message: &[u8]) -> ScalarPallas {
-        Self::make_signature_challenge(&self.public_key_point_pallas, nonce, message)
+        Self::make_signature_challenge(&self.public_key_pallas, nonce, message)
     }
 
     /// WARNING: `secret_nonce` MUST be fresh. Signing two different messages with the same nonce
@@ -160,9 +162,9 @@ impl KeyManager {
         Ok((
             payload,
             dotakon::Signature {
-                signer: Some(proto::h256_to_bytes32(self.wallet_address())),
+                signer: Some(proto::pallas_scalar_to_bytes32(self.wallet_address())),
                 scheme: Some(dotakon::SignatureScheme::SigSchnorrPallasSha3256.into()),
-                public_key: Some(self.public_key_pallas.to_fixed_bytes().to_vec()),
+                public_key: Some(self.compressed_public_key().to_fixed_bytes().to_vec()),
                 signature: Some(signature),
             },
         ))
@@ -181,16 +183,16 @@ impl KeyManager {
         }?;
         let (public_key, wallet_address) = match &signature.public_key {
             Some(bytes) => {
-                let public_key = H256::from_slice(bytes.as_slice());
+                let public_key =
+                    utils::decompress_point_pallas(H256::from_slice(bytes.as_slice()))?;
                 let wallet_address = utils::public_key_to_wallet_address(public_key);
-                let public_key = utils::decompress_point_pallas(public_key)?;
                 Ok((public_key, wallet_address))
             }
             None => Err(anyhow!("invalid signature: public key is missing")),
         }?;
         match signature.signer {
             Some(bytes32) => {
-                let signer = proto::h256_from_bytes32(&bytes32);
+                let signer = proto::pallas_scalar_from_bytes32(&bytes32)?;
                 if signer != wallet_address {
                     Err(anyhow!("invalid signature: mismatching signer address"))
                 } else {
@@ -252,8 +254,8 @@ impl KeyManager {
         nonce_point_25519: &Point25519,
     ) -> Scalar25519 {
         Self::make_public_key_identity_challenge(
-            &self.public_key_point_pallas,
-            &self.public_key_point_25519,
+            &self.public_key_pallas,
+            &self.public_key_25519,
             nonce_point_pallas,
             nonce_point_25519,
         )
@@ -315,6 +317,69 @@ impl KeyManager {
         Ok(())
     }
 
+    fn pallas_point_to_pallas_coordinates(
+        point: &PointPallas,
+    ) -> (ScalarPallas, ScalarPallas, ScalarPallas) {
+        let (x, y, z) = point.jacobian_coordinates();
+        let x = utils::vesta_scalar_to_pallas_scalar(x);
+        let y = utils::vesta_scalar_to_pallas_scalar(y);
+        let z = utils::vesta_scalar_to_pallas_scalar(z);
+        (x, y, z)
+    }
+
+    fn make_poseidon_signature_challenge(
+        public_key: &PointPallas,
+        nonce: &PointPallas,
+        message: ScalarPallas,
+    ) -> ScalarPallas {
+        let (pkx, pky, pkz) = Self::pallas_point_to_pallas_coordinates(public_key);
+        let (nx, ny, nz) = Self::pallas_point_to_pallas_coordinates(nonce);
+        utils::poseidon_hash([pkx, pky, pkz, nx, ny, nz, message])
+    }
+
+    fn make_own_poseidon_signature_challenge(
+        &self,
+        nonce: &PointPallas,
+        message: ScalarPallas,
+    ) -> ScalarPallas {
+        Self::make_poseidon_signature_challenge(&self.public_key_pallas, nonce, message)
+    }
+
+    /// Like `sign`, but uses the Poseidon hash rather than SHA3 so that the signature can be easily
+    /// verified in Halo2.
+    ///
+    /// WARNING: `secret_nonce` MUST be fresh. Signing two different messages with the same nonce
+    /// allows full private key recovery.
+    pub fn sign_poseidon_schnorr(
+        &self,
+        message: ScalarPallas,
+        secret_nonce: ScalarPallas,
+    ) -> utils::SchnorrPallasSignature {
+        let nonce_point = PointPallas::generator() * secret_nonce;
+        let challenge = self.make_own_poseidon_signature_challenge(&nonce_point, message);
+        let signature =
+            secret_nonce + utils::c25519_scalar_to_pallas_scalar(self.private_key) * challenge;
+        utils::SchnorrPallasSignature {
+            nonce: nonce_point,
+            signature,
+        }
+    }
+
+    pub fn verify_poseidon_schnorr(
+        message: ScalarPallas,
+        public_key: &PointPallas,
+        signature: &utils::SchnorrPallasSignature,
+    ) -> Result<()> {
+        let challenge =
+            Self::make_poseidon_signature_challenge(public_key, &signature.nonce, message);
+        if PointPallas::generator() * signature.signature
+            != signature.nonce + public_key * challenge
+        {
+            return Err(anyhow!("invalid signature"));
+        }
+        Ok(())
+    }
+
     fn hash_to_curve(message: &[u8]) -> PointPallas {
         const DOMAIN_SEPARATOR: &str = "dotakon/vrf-v1";
         let hasher = PointPallas::hash_to_curve(DOMAIN_SEPARATOR);
@@ -350,7 +415,7 @@ impl KeyManager {
         u: &PointPallas,
         v: &PointPallas,
     ) -> ScalarPallas {
-        Self::make_verifiable_randomness_challenge(&self.public_key_point_pallas, h, r, u, v)
+        Self::make_verifiable_randomness_challenge(&self.public_key_pallas, h, r, u, v)
     }
 
     pub fn get_verifiable_randomness(
@@ -380,9 +445,9 @@ impl KeyManager {
     ) -> dotakon::VerifiableRandomness {
         let randomness = self.get_verifiable_randomness(message, secret_nonce);
         dotakon::VerifiableRandomness {
-            prover: Some(proto::h256_to_bytes32(self.wallet_address)),
+            prover: Some(proto::pallas_scalar_to_bytes32(self.wallet_address)),
             scheme: Some(dotakon::VerifiableRandomnessScheme::VrfDdhPallasSha3 as i32),
-            public_key: Some(self.public_key_pallas.to_fixed_bytes().to_vec()),
+            public_key: Some(self.compressed_public_key().to_fixed_bytes().to_vec()),
             message: Some(message.to_vec()),
             randomness: Some(randomness.encode()),
         }
@@ -415,13 +480,14 @@ impl KeyManager {
         {
             return Err(anyhow!("unknown VRF scheme"));
         }
-        let prover =
-            proto::h256_from_bytes32(&proto.prover.context("missing prover address field")?);
+        let prover = proto::pallas_scalar_from_bytes32(
+            &proto.prover.context("missing prover address field")?,
+        )?;
         let (public_key, wallet_address) = match &proto.public_key {
             Some(bytes) => {
-                let public_key = H256::from_slice(bytes.as_slice());
+                let public_key =
+                    utils::decompress_point_pallas(H256::from_slice(bytes.as_slice()))?;
                 let wallet_address = utils::public_key_to_wallet_address(public_key);
-                let public_key = utils::decompress_point_pallas(public_key)?;
                 Ok((public_key, wallet_address))
             }
             None => Err(anyhow!("missing public key field")),
@@ -461,20 +527,20 @@ mod tests {
         ]);
         let key_manager = KeyManager::new(secret_key);
         assert_eq!(
-            key_manager.public_key(),
+            utils::compress_point_pallas(&key_manager.public_key()),
             "0xb90f39d546dddd466a131becf6bcb23b5ed621bdb08a1dbd719041ea0d61e6bd"
                 .parse()
                 .unwrap()
         );
         assert_eq!(
-            key_manager.public_key_25519(),
+            key_manager.compressed_public_key_25519(),
             "0x0bb5a735befdf9da0dd2998a1a4e972e1cf8f6df479d11722f81557770e9dff6"
                 .parse()
                 .unwrap()
         );
         assert_eq!(
-            key_manager.wallet_address(),
-            "0xc339ee2a90762fbeb97de4c0e2eabd81023e71d0ddec6072d7f4934cd2e4ecc9"
+            utils::pallas_scalar_to_u256(key_manager.wallet_address()),
+            "0x26a04b9377416b20719cb7ad01f0d4fe38fe7f9018e723a4e78576996d0cde95"
                 .parse()
                 .unwrap()
         );
@@ -491,12 +557,7 @@ mod tests {
             ]),
         );
         assert!(
-            KeyManager::verify(
-                message.as_bytes(),
-                &key_manager.public_key_point_pallas,
-                &signature
-            )
-            .is_ok()
+            KeyManager::verify(message.as_bytes(), &key_manager.public_key(), &signature).is_ok()
         );
     }
 
@@ -524,7 +585,7 @@ mod tests {
         assert!(
             !KeyManager::verify(
                 "World, hello!".as_bytes(),
-                &key_manager.public_key_point_pallas,
+                &key_manager.public_key(),
                 &signature
             )
             .is_ok()
@@ -544,12 +605,7 @@ mod tests {
         ]);
         let signature = key_manager1.sign(message.as_bytes(), nonce);
         assert!(
-            !KeyManager::verify(
-                message.as_bytes(),
-                &key_manager2.public_key_point_pallas,
-                &signature
-            )
-            .is_ok()
+            !KeyManager::verify(message.as_bytes(), &key_manager2.public_key(), &signature).is_ok()
         );
     }
 
@@ -626,10 +682,14 @@ mod tests {
                 ]),
             )
             .unwrap();
-        signature.public_key = Some(public_key2.to_fixed_bytes().to_vec());
-        signature.signer = Some(proto::h256_to_bytes32(utils::public_key_to_wallet_address(
-            public_key2,
-        )));
+        signature.public_key = Some(
+            utils::compress_point_pallas(&public_key2)
+                .to_fixed_bytes()
+                .to_vec(),
+        );
+        signature.signer = Some(proto::pallas_scalar_to_bytes32(
+            utils::public_key_to_wallet_address(public_key2),
+        ));
         assert!(!KeyManager::verify_signed_message(&any, &signature).is_ok());
     }
 
@@ -651,9 +711,9 @@ mod tests {
                 ]),
             )
             .unwrap();
-        signature.signer = Some(proto::h256_to_bytes32(utils::public_key_to_wallet_address(
-            public_key2,
-        )));
+        signature.signer = Some(proto::pallas_scalar_to_bytes32(
+            utils::public_key_to_wallet_address(public_key2),
+        ));
         assert!(!KeyManager::verify_signed_message(&any, &signature).is_ok());
     }
 
@@ -687,7 +747,7 @@ mod tests {
         assert!(
             KeyManager::verify_ed25519(
                 message.as_bytes(),
-                key_manager.public_key_25519(),
+                key_manager.compressed_public_key_25519(),
                 &signature_bytes
             )
             .is_ok()
@@ -719,7 +779,7 @@ mod tests {
         assert!(
             !KeyManager::verify_ed25519(
                 message.as_bytes(),
-                key_manager2.public_key_25519(),
+                key_manager2.compressed_public_key_25519(),
                 &signature_bytes
             )
             .is_ok()
@@ -729,7 +789,9 @@ mod tests {
     #[test]
     fn test_remote_key_pair_construction() {
         let (secret_key, _, public_key) = utils::testing_keys1();
-        let public_key_vec = public_key.to_fixed_bytes().to_vec();
+        let public_key_vec = utils::compress_point_c25519(&public_key)
+            .to_fixed_bytes()
+            .to_vec();
         let km1 = KeyManager::new(secret_key);
         let km2 = Box::new(KeyManager::new(secret_key));
         let km3 = Arc::new(KeyManager::new(secret_key));
@@ -750,29 +812,32 @@ mod tests {
         assert_eq!(remote_key_pair.algorithm(), &rcgen::PKCS_ED25519);
     }
 
-    fn test_remote_key_pair_public_key(secret_key: H256, public_key: H256) {
+    fn test_remote_key_pair_public_key(secret_key: H256) {
         let key_manager = KeyManager::new(secret_key);
         let remote_key_pair: Box<dyn rcgen::RemoteKeyPair> =
             Box::new(RemoteEd25519KeyPair::from(&key_manager));
         assert_eq!(
             remote_key_pair.public_key().to_vec(),
-            public_key.to_fixed_bytes().to_vec(),
+            key_manager
+                .compressed_public_key_25519()
+                .to_fixed_bytes()
+                .to_vec(),
         );
     }
 
     #[test]
     fn test_remote_key_pair_public_key1() {
-        let (secret_key, _, public_key) = utils::testing_keys1();
-        test_remote_key_pair_public_key(secret_key, public_key);
+        let (secret_key, _, _) = utils::testing_keys1();
+        test_remote_key_pair_public_key(secret_key);
     }
 
     #[test]
     fn test_remote_key_pair_public_key2() {
-        let (secret_key, _, public_key) = utils::testing_keys2();
-        test_remote_key_pair_public_key(secret_key, public_key);
+        let (secret_key, _, _) = utils::testing_keys2();
+        test_remote_key_pair_public_key(secret_key);
     }
 
-    fn test_remote_key_pair_signature(secret_key: H256, public_key: H256) {
+    fn test_remote_key_pair_signature(secret_key: H256) {
         let key_manager = KeyManager::new(secret_key);
         let remote_key_pair: Box<dyn rcgen::RemoteKeyPair> =
             Box::new(RemoteEd25519KeyPair::from(&key_manager));
@@ -781,20 +846,25 @@ mod tests {
         let mut signature_bytes = [0u8; ed25519_dalek::SIGNATURE_LENGTH];
         signature_bytes.copy_from_slice(signature.as_slice());
         assert!(
-            KeyManager::verify_ed25519(message.as_bytes(), public_key, &signature_bytes).is_ok()
+            KeyManager::verify_ed25519(
+                message.as_bytes(),
+                key_manager.compressed_public_key_25519(),
+                &signature_bytes
+            )
+            .is_ok()
         );
     }
 
     #[test]
     fn test_remote_key_pair_signature1() {
-        let (secret_key, _, public_key) = utils::testing_keys1();
-        test_remote_key_pair_signature(secret_key, public_key);
+        let (secret_key, _, _) = utils::testing_keys1();
+        test_remote_key_pair_signature(secret_key);
     }
 
     #[test]
     fn test_remote_key_pair_signature2() {
-        let (secret_key, _, public_key) = utils::testing_keys2();
-        test_remote_key_pair_signature(secret_key, public_key);
+        let (secret_key, _, _) = utils::testing_keys2();
+        test_remote_key_pair_signature(secret_key);
     }
 
     fn test_key_identity_proof(secret_key: H256) {
@@ -805,8 +875,8 @@ mod tests {
         ]));
         assert!(
             KeyManager::verify_public_key_identity(
-                &key_manager.public_key_point_pallas,
-                &key_manager.public_key_point_25519,
+                &key_manager.public_key(),
+                &key_manager.public_key_25519(),
                 &signature,
             )
             .is_ok()
@@ -857,11 +927,77 @@ mod tests {
         ]));
         assert!(
             !KeyManager::verify_public_key_identity(
-                &key_manager2.public_key_point_pallas,
-                &key_manager2.public_key_point_25519,
+                &key_manager2.public_key(),
+                &key_manager2.public_key_25519(),
                 &signature,
             )
             .is_ok()
+        );
+    }
+
+    fn test_poseidon_schnorr_signature(secret_key: H256) {
+        let key_manager = KeyManager::new(secret_key);
+        let message = utils::parse_pallas_scalar(
+            "0x00001e1d1c1b1a191817161514131211100f0e0d0c0b0a090807060504030201",
+        );
+        let nonce = utils::parse_pallas_scalar(
+            "0x0000030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+        );
+        let signature = key_manager.sign_poseidon_schnorr(message, nonce);
+        assert!(
+            KeyManager::verify_poseidon_schnorr(message, &key_manager.public_key(), &signature)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_poseidon_schnorr_signature1() {
+        let (secret_key, _, _) = utils::testing_keys1();
+        test_poseidon_schnorr_signature(secret_key);
+    }
+
+    #[test]
+    fn test_poseidon_schnorr_signature2() {
+        let (secret_key, _, _) = utils::testing_keys2();
+        test_poseidon_schnorr_signature(secret_key);
+    }
+
+    #[test]
+    fn test_poseidon_schnorr_signature_wrong_message() {
+        let (secret_key, _, _) = utils::testing_keys1();
+        let key_manager = KeyManager::new(secret_key);
+        let message1 = utils::parse_pallas_scalar(
+            "0x00001e1d1c1b1a191817161514131211100f0e0d0c0b0a090807060504030201",
+        );
+        let nonce = utils::parse_pallas_scalar(
+            "0x0000030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+        );
+        let signature = key_manager.sign_poseidon_schnorr(message1, nonce);
+        let message2 = utils::parse_pallas_scalar(
+            "0x0000030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+        );
+        assert!(
+            KeyManager::verify_poseidon_schnorr(message2, &key_manager.public_key(), &signature)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn test_poseidon_schnorr_signature_wrong_public_key() {
+        let (secret_key1, _, _) = utils::testing_keys1();
+        let key_manager1 = KeyManager::new(secret_key1);
+        let (secret_key2, _, _) = utils::testing_keys2();
+        let key_manager2 = KeyManager::new(secret_key2);
+        let message = utils::parse_pallas_scalar(
+            "0x00001e1d1c1b1a191817161514131211100f0e0d0c0b0a090807060504030201",
+        );
+        let nonce = utils::parse_pallas_scalar(
+            "0x0000030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+        );
+        let signature = key_manager1.sign_poseidon_schnorr(message, nonce);
+        assert!(
+            KeyManager::verify_poseidon_schnorr(message, &key_manager2.public_key(), &signature)
+                .is_err()
         );
     }
 
@@ -875,7 +1011,7 @@ mod tests {
         let randomness = key_manager.get_verifiable_randomness(message.as_bytes(), nonce);
         assert!(
             KeyManager::verify_randomness(
-                &utils::decompress_point_pallas(key_manager.public_key()).unwrap(),
+                &key_manager.public_key(),
                 message.as_bytes(),
                 &randomness
             )
@@ -907,12 +1043,7 @@ mod tests {
         ]);
         let randomness = key_manager.get_verifiable_randomness(message.as_bytes(), nonce);
         assert!(
-            KeyManager::verify_randomness(
-                &utils::decompress_point_pallas(public_key2).unwrap(),
-                message.as_bytes(),
-                &randomness
-            )
-            .is_err()
+            KeyManager::verify_randomness(&public_key2, message.as_bytes(), &randomness).is_err()
         );
     }
 
@@ -928,12 +1059,7 @@ mod tests {
         let randomness = key_manager.get_verifiable_randomness(message1.as_bytes(), nonce);
         let message2 = "World, hello!";
         assert!(
-            KeyManager::verify_randomness(
-                &utils::decompress_point_pallas(public_key).unwrap(),
-                message2.as_bytes(),
-                &randomness
-            )
-            .is_err()
+            KeyManager::verify_randomness(&public_key, message2.as_bytes(), &randomness).is_err()
         );
     }
 
@@ -971,7 +1097,11 @@ mod tests {
             24, 25, 26, 27, 28, 29, 30, 0, 0,
         ]);
         let mut randomness = key_manager.get_verifiable_randomness_proto(message.as_bytes(), nonce);
-        randomness.public_key = Some(public_key2.to_fixed_bytes().to_vec());
+        randomness.public_key = Some(
+            utils::compress_point_pallas(&public_key2)
+                .to_fixed_bytes()
+                .to_vec(),
+        );
         assert!(KeyManager::verify_randomness_proto(&randomness,).is_err());
     }
 

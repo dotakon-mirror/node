@@ -7,12 +7,6 @@ pub trait Clock: Send + Sync {
 #[derive(Default)]
 pub struct RealClock {}
 
-impl RealClock {
-    pub fn new() -> Self {
-        Self {}
-    }
-}
-
 impl Clock for RealClock {
     fn now(&self) -> SystemTime {
         SystemTime::now()

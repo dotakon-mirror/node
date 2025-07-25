@@ -1,9 +1,9 @@
 use crate::keys;
 use crate::ssl;
 use crate::utils;
-use anyhow::{self, Context};
+use anyhow::Context;
 use hyper::rt::{Read, ReadBufCursor, Write};
-use primitive_types::H256;
+use pasta_curves::{pallas::Point as PointPallas, pallas::Scalar as ScalarPallas};
 use rustls::pki_types::ServerName;
 use std::io::{Error, ErrorKind};
 use std::net::SocketAddr;
@@ -17,16 +17,10 @@ use tokio::{
 use tokio_rustls::{TlsAcceptor, TlsConnector, client, server};
 use tonic::transport::{Channel, Uri, server::Connected};
 
-#[cfg(test)]
-use futures::future;
-
-#[cfg(test)]
-use tokio::io::DuplexStream;
-
 #[derive(Debug, Clone)]
 pub struct ConnectionInfo {
     peer_certificate: rustls::pki_types::CertificateDer<'static>,
-    peer_public_key: H256,
+    peer_public_key: PointPallas,
 }
 
 impl ConnectionInfo {
@@ -46,11 +40,11 @@ impl ConnectionInfo {
         self.peer_certificate.clone()
     }
 
-    pub fn peer_public_key(&self) -> H256 {
+    pub fn peer_public_key(&self) -> PointPallas {
         self.peer_public_key
     }
 
-    pub fn peer_wallet_address(&self) -> H256 {
+    pub fn peer_wallet_address(&self) -> ScalarPallas {
         utils::public_key_to_wallet_address(self.peer_public_key)
     }
 }
@@ -226,33 +220,6 @@ impl Listener<TcpStream> for TcpListenerAdapter {
     }
 }
 
-#[cfg(test)]
-pub struct MockListener {
-    stream: Mutex<Option<DuplexStream>>,
-}
-
-#[cfg(test)]
-impl MockListener {
-    pub fn new(stream: DuplexStream) -> Self {
-        Self {
-            stream: Mutex::new(Some(stream)),
-        }
-    }
-}
-
-#[cfg(test)]
-impl Listener<DuplexStream> for MockListener {
-    fn accept<'a>(
-        &'a self,
-    ) -> Pin<Box<dyn Future<Output = std::io::Result<DuplexStream>> + Send + 'a>> {
-        let mut lock = self.stream.lock().unwrap();
-        Box::pin(match lock.take() {
-            Some(stream) => future::Either::Left(future::ready(Ok(stream))),
-            None => future::Either::Right(future::pending()),
-        })
-    }
-}
-
 type TlsHandshakeFuture<IO> =
     Pin<Box<dyn Future<Output = std::io::Result<TlsServerStreamAdapter<IO>>> + Send>>;
 
@@ -339,34 +306,6 @@ impl Connector<TcpStream> for TcpConnectorAdapter {
         Box::pin(async move {
             let stream = TcpStream::connect(address).await?;
             Ok(stream)
-        })
-    }
-}
-
-#[cfg(test)]
-pub struct MockConnector {
-    stream: Mutex<Option<DuplexStream>>,
-}
-
-#[cfg(test)]
-impl MockConnector {
-    pub fn new(stream: DuplexStream) -> Self {
-        Self {
-            stream: Mutex::new(Some(stream)),
-        }
-    }
-}
-
-#[cfg(test)]
-impl Connector<DuplexStream> for MockConnector {
-    fn connect<'a>(
-        &'a self,
-        _address: String,
-    ) -> Pin<Box<dyn Future<Output = std::io::Result<DuplexStream>> + Send + 'a>> {
-        let mut lock = self.stream.lock().unwrap();
-        Box::pin(match lock.take() {
-            Some(stream) => future::Either::Left(future::ready(Ok(stream))),
-            None => future::Either::Right(future::pending()),
         })
     }
 }
@@ -476,28 +415,84 @@ pub async fn connect_with_mtls(
 }
 
 #[cfg(test)]
-pub async fn mock_connect_with_mtls(
-    stream: DuplexStream,
-    key_manager: Arc<keys::KeyManager>,
-    certificate: Arc<rcgen::Certificate>,
-) -> anyhow::Result<(Channel, ConnectionInfo)> {
-    let peer_certificate = Arc::new(Mutex::new(
-        None::<rustls::pki_types::CertificateDer<'static>>,
-    ));
-    let channel = Channel::builder("http://fake".parse().unwrap())
-        .connect_with_connector(
-            ConnectorWithMTls::new(
-                Arc::new(MockConnector::new(stream)),
-                key_manager.clone(),
-                certificate.clone(),
-                peer_certificate.clone(),
+pub mod test {
+    use super::*;
+    use futures::future;
+    use std::sync::Mutex;
+    use tokio::io::DuplexStream;
+
+    pub struct MockListener {
+        stream: Mutex<Option<DuplexStream>>,
+    }
+
+    impl MockListener {
+        pub fn new(stream: DuplexStream) -> Self {
+            Self {
+                stream: Mutex::new(Some(stream)),
+            }
+        }
+    }
+
+    impl Listener<DuplexStream> for MockListener {
+        fn accept<'a>(
+            &'a self,
+        ) -> Pin<Box<dyn Future<Output = std::io::Result<DuplexStream>> + Send + 'a>> {
+            let mut lock = self.stream.lock().unwrap();
+            Box::pin(match lock.take() {
+                Some(stream) => future::Either::Left(future::ready(Ok(stream))),
+                None => future::Either::Right(future::pending()),
+            })
+        }
+    }
+
+    pub struct MockConnector {
+        stream: Mutex<Option<DuplexStream>>,
+    }
+
+    impl MockConnector {
+        pub fn new(stream: DuplexStream) -> Self {
+            Self {
+                stream: Mutex::new(Some(stream)),
+            }
+        }
+    }
+
+    impl Connector<DuplexStream> for MockConnector {
+        fn connect<'a>(
+            &'a self,
+            _address: String,
+        ) -> Pin<Box<dyn Future<Output = std::io::Result<DuplexStream>> + Send + 'a>> {
+            let mut lock = self.stream.lock().unwrap();
+            Box::pin(match lock.take() {
+                Some(stream) => future::Either::Left(future::ready(Ok(stream))),
+                None => future::Either::Right(future::pending()),
+            })
+        }
+    }
+
+    pub async fn mock_connect_with_mtls(
+        stream: DuplexStream,
+        key_manager: Arc<keys::KeyManager>,
+        certificate: Arc<rcgen::Certificate>,
+    ) -> anyhow::Result<(Channel, ConnectionInfo)> {
+        let peer_certificate = Arc::new(Mutex::new(
+            None::<rustls::pki_types::CertificateDer<'static>>,
+        ));
+        let channel = Channel::builder("http://fake".parse().unwrap())
+            .connect_with_connector(
+                ConnectorWithMTls::new(
+                    Arc::new(MockConnector::new(stream)),
+                    key_manager.clone(),
+                    certificate.clone(),
+                    peer_certificate.clone(),
+                )
+                .unwrap(),
             )
-            .unwrap(),
-        )
-        .await?;
-    let peer_certificate = peer_certificate.lock().unwrap().as_mut().unwrap().clone();
-    let connection_info = ConnectionInfo::new(peer_certificate)?;
-    Ok((channel, connection_info))
+            .await?;
+        let peer_certificate = peer_certificate.lock().unwrap().as_mut().unwrap().clone();
+        let connection_info = ConnectionInfo::new(peer_certificate)?;
+        Ok((channel, connection_info))
+    }
 }
 
 #[cfg(test)]
@@ -509,6 +504,7 @@ mod tests {
     };
     use crate::fake::FakeNodeService;
     use crate::utils::public_key_to_wallet_address;
+    use primitive_types::H256;
     use tokio::{self, sync::Notify};
     use tonic::{Request, transport::Server};
 
@@ -868,7 +864,7 @@ mod tests {
         let server = tokio::task::spawn(async move {
             let future = Server::builder().add_service(service).serve_with_incoming(
                 IncomingWithMTls::new(
-                    Arc::new(MockListener::new(server_stream)),
+                    Arc::new(test::MockListener::new(server_stream)),
                     server_key_manager,
                     server_certificate,
                 )
@@ -881,7 +877,7 @@ mod tests {
         start_client.notified().await;
 
         let (channel, connection_info) =
-            mock_connect_with_mtls(client_stream, client_key_manager, client_certificate)
+            test::mock_connect_with_mtls(client_stream, client_key_manager, client_certificate)
                 .await
                 .unwrap();
         assert_eq!(server_public_key, connection_info.peer_public_key());

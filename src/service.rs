@@ -2,11 +2,13 @@ use crate::clock::Clock;
 use crate::db;
 use crate::dotakon::{self, node_service_v1_server::NodeServiceV1};
 use crate::keys;
+use crate::mpt;
 use crate::net;
 use crate::proto;
 use crate::utils;
 use crate::version;
 use anyhow::Context;
+use pasta_curves::{pallas::Point, pallas::Scalar};
 use primitive_types::H256;
 use rand_core::{OsRng, TryRngCore};
 use std::pin::Pin;
@@ -45,7 +47,9 @@ impl NodeService {
     ) -> dotakon::node_identity::Payload {
         dotakon::node_identity::Payload {
             protocol_version: Some(Self::get_protocol_version()),
-            account_address: Some(proto::h256_to_bytes32(key_manager.wallet_address())),
+            account_address: Some(proto::pallas_scalar_to_bytes32(
+                key_manager.wallet_address(),
+            )),
             location: Some(location),
             network_address: Some(public_address.to_owned()),
             grpc_port: Some(grpc_port.into()),
@@ -68,10 +72,10 @@ impl NodeService {
         grpc_port: u16,
         http_port: u16,
     ) -> anyhow::Result<Self> {
-        println!("Public key: {:#x}", key_manager.public_key());
+        println!("Public key: {:#x}", key_manager.compressed_public_key());
         println!(
             "Public key (Ed25519): {:#x}",
-            key_manager.public_key_25519()
+            key_manager.compressed_public_key_25519()
         );
         println!(
             "Wallet address: {}",
@@ -94,7 +98,7 @@ impl NodeService {
         })
     }
 
-    fn get_client_public_key<M>(&self, request: &Request<M>) -> anyhow::Result<H256> {
+    fn get_client_public_key<M>(&self, request: &Request<M>) -> anyhow::Result<Point> {
         let info = request
             .extensions()
             .get::<net::ConnectionInfo>()
@@ -102,7 +106,7 @@ impl NodeService {
         Ok(info.peer_public_key())
     }
 
-    fn get_client_wallet_address<M>(&self, request: &Request<M>) -> anyhow::Result<H256> {
+    fn get_client_wallet_address<M>(&self, request: &Request<M>) -> anyhow::Result<Scalar> {
         let info = request
             .extensions()
             .get::<net::ConnectionInfo>()
@@ -123,45 +127,55 @@ impl NodeService {
     ) -> anyhow::Result<()> {
         keys::KeyManager::verify_signed_message(payload, signature)
     }
-}
 
-impl NodeService {
-    fn get_block_impl(&self, request: &dotakon::GetBlockRequest) -> Result<&db::BlockInfo, Status> {
-        if let Some(block_hash) = request.block_hash {
-            let block_hash = proto::h256_from_bytes32(&block_hash);
-            self.db
-                .get_block_by_hash(block_hash)
-                .context(format!("block hash {:#x} not found", block_hash))
-                .map_err(|error| Status::not_found(error.to_string()))
-        } else {
-            Ok(self.db.get_latest_block())
+    fn get_block_impl(&self, request: &dotakon::GetBlockRequest) -> Result<db::BlockInfo, Status> {
+        match request.block_hash {
+            Some(block_hash) => {
+                let block_hash = proto::pallas_scalar_from_bytes32(&block_hash)
+                    .map_err(|_| Status::invalid_argument("invalid block hash"))?;
+                self.db
+                    .get_block_by_hash(block_hash)
+                    .context(format!(
+                        "block hash {:#x} not found",
+                        utils::pallas_scalar_to_u256(block_hash)
+                    ))
+                    .map_err(|error| Status::not_found(error.to_string()))
+            }
+            None => Ok(self.db.get_latest_block()),
         }
     }
 
     fn get_account_balance_impl(
         &self,
         request: &dotakon::GetAccountBalanceRequest,
-    ) -> Result<(db::BlockInfo, db::AccountBalanceProof), Status> {
-        let account_address = proto::h256_from_bytes32(
+    ) -> Result<(db::BlockInfo, mpt::AccountBalanceProof), Status> {
+        let account_address = proto::pallas_scalar_from_bytes32(
             &request
                 .account_address
                 .context("missing account address field")
                 .map_err(|error| Status::invalid_argument(error.to_string()))?,
-        );
-        if let Some(block_hash) = request.block_hash {
-            let block_hash = proto::h256_from_bytes32(&block_hash);
-            self.db
-                .get_balance(account_address, block_hash)
-                .map_err(|_| {
-                    Status::not_found(format!(
-                        "account address {:#x} not found at block {:#x}",
-                        account_address, block_hash
-                    ))
-                })
-        } else {
-            self.db.get_latest_balance(account_address).map_err(|_| {
-                Status::not_found(format!("account address {:#x} not found", account_address))
-            })
+        )
+        .map_err(|_| Status::invalid_argument("invalid account address"))?;
+        match request.block_hash {
+            Some(block_hash) => {
+                let block_hash = proto::pallas_scalar_from_bytes32(&block_hash)
+                    .map_err(|_| Status::invalid_argument("invalid block hash"))?;
+                self.db
+                    .get_balance(account_address, block_hash)
+                    .map_err(|_| {
+                        Status::not_found(format!(
+                            "account address {:#x} not found at block {:#x}",
+                            utils::pallas_scalar_to_u256(account_address),
+                            utils::pallas_scalar_to_u256(block_hash)
+                        ))
+                    })
+            }
+            None => self.db.get_latest_balance(account_address).map_err(|_| {
+                Status::not_found(format!(
+                    "account address {:#x} not found",
+                    utils::pallas_scalar_to_u256(account_address)
+                ))
+            }),
         }
     }
 }
@@ -187,18 +201,22 @@ impl NodeServiceV1 for NodeService {
     ) -> Result<Response<dotakon::GetBlockResponse>, Status> {
         let block_info = self.get_block_impl(request.get_ref())?;
         let descriptor = dotakon::BlockDescriptor {
-            block_hash: Some(proto::h256_to_bytes32(block_info.hash())),
+            block_hash: Some(proto::pallas_scalar_to_bytes32(block_info.hash())),
             block_number: Some(block_info.number()),
-            previous_block_hash: Some(proto::h256_to_bytes32(block_info.previous_block_hash())),
+            previous_block_hash: Some(proto::pallas_scalar_to_bytes32(
+                block_info.previous_block_hash(),
+            )),
             timestamp: Some(block_info.timestamp().into()),
-            network_topology_root_hash: Some(proto::h256_to_bytes32(
+            network_topology_root_hash: Some(proto::pallas_scalar_to_bytes32(
                 block_info.network_topology_root_hash(),
             )),
-            last_transaction_hash: Some(proto::h256_to_bytes32(block_info.last_transaction_hash())),
-            account_balances_root_hash: Some(proto::h256_to_bytes32(
+            last_transaction_hash: Some(proto::pallas_scalar_to_bytes32(
+                block_info.last_transaction_hash(),
+            )),
+            account_balances_root_hash: Some(proto::pallas_scalar_to_bytes32(
                 block_info.account_balances_root_hash(),
             )),
-            program_storage_root_hash: Some(proto::h256_to_bytes32(
+            program_storage_root_hash: Some(proto::pallas_scalar_to_bytes32(
                 block_info.program_storage_root_hash(),
             )),
         };
@@ -215,7 +233,7 @@ impl NodeServiceV1 for NodeService {
         &self,
         _request: Request<dotakon::GetTopologyRequest>,
     ) -> Result<Response<dotakon::NetworkTopology>, Status> {
-        todo!()
+        Ok(Response::new(dotakon::NetworkTopology { cluster: vec![] }))
     }
 
     async fn get_transaction(
@@ -223,7 +241,8 @@ impl NodeServiceV1 for NodeService {
         request: Request<dotakon::GetTransactionRequest>,
     ) -> Result<Response<dotakon::GetTransactionResponse>, Status> {
         let transaction_hash = match request.get_ref().transaction_hash {
-            Some(hash) => proto::h256_from_bytes32(&hash),
+            Some(hash) => proto::pallas_scalar_from_bytes32(&hash)
+                .map_err(|_| Status::invalid_argument("invalid transaction hash"))?,
             None => return Err(Status::invalid_argument("transaction hash field missing")),
         };
         match self.db.get_transaction(transaction_hash) {
@@ -232,7 +251,7 @@ impl NodeServiceV1 for NodeService {
                     .key_manager
                     .sign_message(
                         &dotakon::BoundTransaction {
-                            parent_transaction_hash: Some(proto::h256_to_bytes32(
+                            parent_transaction_hash: Some(proto::pallas_scalar_to_bytes32(
                                 transaction.parent_hash(),
                             )),
                             transaction: Some(transaction.diff()),
@@ -247,7 +266,7 @@ impl NodeServiceV1 for NodeService {
             }
             None => Err(Status::not_found(format!(
                 "transaction hash {:#x} not found",
-                transaction_hash
+                utils::pallas_scalar_to_u256(transaction_hash)
             ))),
         }
     }
@@ -302,8 +321,9 @@ mod tests {
         self, node_service_v1_client::NodeServiceV1Client,
         node_service_v1_server::NodeServiceV1Server,
     };
+    use crate::net;
     use crate::ssl;
-    use primitive_types::H256;
+    use ff::Field;
     use std::time::Duration;
     use tokio::sync::Notify;
     use tokio::task::JoinHandle;
@@ -342,14 +362,17 @@ mod tests {
                 SystemTime::UNIX_EPOCH + Duration::from_secs(71104),
             ));
 
-            let service = NodeServiceV1Server::new(NodeService::new(
-                clock.clone(),
-                server_key_manager.clone(),
-                location,
-                "localhost",
-                4443,
-                8080,
-            )?);
+            let service = NodeServiceV1Server::new(
+                NodeService::new(
+                    clock.clone(),
+                    server_key_manager.clone(),
+                    location,
+                    "localhost",
+                    4443,
+                    8080,
+                )
+                .unwrap(),
+            );
 
             let (server_stream, client_stream) = tokio::io::duplex(4096);
 
@@ -360,7 +383,7 @@ mod tests {
             let server_handle = tokio::task::spawn(async move {
                 let future = Server::builder().add_service(service).serve_with_incoming(
                     net::IncomingWithMTls::new(
-                        Arc::new(net::MockListener::new(server_stream)),
+                        Arc::new(net::test::MockListener::new(server_stream)),
                         server_key_manager_clone,
                         server_certificate,
                     )
@@ -372,7 +395,7 @@ mod tests {
             });
             start_client.notified().await;
 
-            let (channel, _) = net::mock_connect_with_mtls(
+            let (channel, _) = net::test::mock_connect_with_mtls(
                 client_stream,
                 client_key_manager.clone(),
                 client_certificate.clone(),
@@ -409,10 +432,13 @@ mod tests {
         }
     }
 
-    fn genesis_block_hash() -> H256 {
-        "0x06cd735786d99bb1263b40ef8a7409a9631e403de0032aa90a85f8c319ca8530"
-            .parse()
-            .unwrap()
+    fn genesis_block_hash() -> Scalar {
+        utils::u256_to_pallas_scalar(
+            "0x0040432efa8475c5694a17712f677108a6fbe623a977f99802ebedc0f17afe91"
+                .parse()
+                .unwrap(),
+        )
+        .unwrap()
     }
 
     #[tokio::test]
@@ -447,7 +473,7 @@ mod tests {
         );
 
         assert_eq!(
-            proto::h256_from_bytes32(&payload.account_address.unwrap()),
+            proto::pallas_scalar_from_bytes32(&payload.account_address.unwrap()).unwrap(),
             fixture.server_key_manager.wallet_address()
         );
 
@@ -467,7 +493,7 @@ mod tests {
 
         let response = client
             .get_block(dotakon::GetBlockRequest {
-                block_hash: Some(proto::h256_to_bytes32(genesis_block_hash())),
+                block_hash: Some(proto::pallas_scalar_to_bytes32(genesis_block_hash())),
             })
             .await
             .unwrap();
@@ -483,31 +509,33 @@ mod tests {
         let payload = payload.to_msg::<dotakon::BlockDescriptor>().unwrap();
 
         assert_eq!(
-            proto::h256_from_bytes32(&payload.block_hash.unwrap()),
+            proto::pallas_scalar_from_bytes32(&payload.block_hash.unwrap()).unwrap(),
             genesis_block_hash()
         );
         assert_eq!(payload.block_number.unwrap(), 0);
         assert_eq!(
-            proto::h256_from_bytes32(&payload.previous_block_hash.unwrap()),
-            H256::zero()
+            proto::pallas_scalar_from_bytes32(&payload.previous_block_hash.unwrap()).unwrap(),
+            Scalar::ZERO
         );
         assert_eq!(
-            proto::h256_from_bytes32(&payload.network_topology_root_hash.unwrap()),
-            "0x08c02c5001b9b0780aa3466891c1b28285d897429aba44692165a5ac6f5f89ec"
-                .parse()
-                .unwrap()
+            proto::pallas_scalar_from_bytes32(&payload.network_topology_root_hash.unwrap())
+                .unwrap(),
+            utils::parse_pallas_scalar(
+                "0x3f75bfd1de06f77cce4d43d38ffac77eac6a8de697cf3b2a798bc19f1cb1c2b2"
+            )
         );
         assert_eq!(
-            proto::h256_from_bytes32(&payload.account_balances_root_hash.unwrap()),
-            "0xb4a3716bd9261f312ea71656dda4caa0d694f0f6816712036ee8fce833e4b46f"
-                .parse()
-                .unwrap()
+            proto::pallas_scalar_from_bytes32(&payload.account_balances_root_hash.unwrap())
+                .unwrap(),
+            utils::parse_pallas_scalar(
+                "0x375830d6862157562431f637dcb4aa91e2bba7220abfa58b7618a713e9bb8803"
+            )
         );
         assert_eq!(
-            proto::h256_from_bytes32(&payload.program_storage_root_hash.unwrap()),
-            "0xb4a3716bd9261f312ea71656dda4caa0d694f0f6816712036ee8fce833e4b46f"
-                .parse()
-                .unwrap()
+            proto::pallas_scalar_from_bytes32(&payload.program_storage_root_hash.unwrap()).unwrap(),
+            utils::parse_pallas_scalar(
+                "0x22eb7ecec06c24f54d23ed5098b765d728698f22a5749a7404ba055475fa296d"
+            )
         );
     }
 
@@ -532,31 +560,33 @@ mod tests {
         let payload = payload.to_msg::<dotakon::BlockDescriptor>().unwrap();
 
         assert_eq!(
-            proto::h256_from_bytes32(&payload.block_hash.unwrap()),
+            proto::pallas_scalar_from_bytes32(&payload.block_hash.unwrap()).unwrap(),
             genesis_block_hash()
         );
         assert_eq!(payload.block_number.unwrap(), 0);
         assert_eq!(
-            proto::h256_from_bytes32(&payload.previous_block_hash.unwrap()),
-            H256::zero()
+            proto::pallas_scalar_from_bytes32(&payload.previous_block_hash.unwrap()).unwrap(),
+            Scalar::ZERO
         );
         assert_eq!(
-            proto::h256_from_bytes32(&payload.network_topology_root_hash.unwrap()),
-            "0x08c02c5001b9b0780aa3466891c1b28285d897429aba44692165a5ac6f5f89ec"
-                .parse()
-                .unwrap()
+            proto::pallas_scalar_from_bytes32(&payload.network_topology_root_hash.unwrap())
+                .unwrap(),
+            utils::parse_pallas_scalar(
+                "0x3f75bfd1de06f77cce4d43d38ffac77eac6a8de697cf3b2a798bc19f1cb1c2b2"
+            )
         );
         assert_eq!(
-            proto::h256_from_bytes32(&payload.account_balances_root_hash.unwrap()),
-            "0xb4a3716bd9261f312ea71656dda4caa0d694f0f6816712036ee8fce833e4b46f"
-                .parse()
-                .unwrap()
+            proto::pallas_scalar_from_bytes32(&payload.account_balances_root_hash.unwrap())
+                .unwrap(),
+            utils::parse_pallas_scalar(
+                "0x375830d6862157562431f637dcb4aa91e2bba7220abfa58b7618a713e9bb8803"
+            )
         );
         assert_eq!(
-            proto::h256_from_bytes32(&payload.program_storage_root_hash.unwrap()),
-            "0xb4a3716bd9261f312ea71656dda4caa0d694f0f6816712036ee8fce833e4b46f"
-                .parse()
-                .unwrap()
+            proto::pallas_scalar_from_bytes32(&payload.program_storage_root_hash.unwrap()).unwrap(),
+            utils::parse_pallas_scalar(
+                "0x22eb7ecec06c24f54d23ed5098b765d728698f22a5749a7404ba055475fa296d"
+            )
         );
     }
 
@@ -567,11 +597,9 @@ mod tests {
         assert!(
             client
                 .get_block(dotakon::GetBlockRequest {
-                    block_hash: Some(proto::h256_to_bytes32(
-                        "0xb4a3716bd9261f312ea71656dda4caa0d694f0f6816712036ee8fce833e4b46f"
-                            .parse()
-                            .unwrap(),
-                    )),
+                    block_hash: Some(proto::pallas_scalar_to_bytes32(utils::parse_pallas_scalar(
+                        "0x375830d6862157562431f637dcb4aa91e2bba7220abfa58b7618a713e9bb8803"
+                    ))),
                 })
                 .await
                 .is_err()
@@ -588,8 +616,8 @@ mod tests {
 
         let response = client
             .get_account_balance(dotakon::GetAccountBalanceRequest {
-                account_address: Some(proto::h256_to_bytes32(account_address)),
-                block_hash: Some(proto::h256_to_bytes32(genesis_block_hash())),
+                account_address: Some(proto::pallas_scalar_to_bytes32(account_address)),
+                block_hash: Some(proto::pallas_scalar_to_bytes32(genesis_block_hash())),
             })
             .await
             .unwrap();
@@ -607,12 +635,12 @@ mod tests {
         let block_info = db::BlockInfo::decode(&payload.block_descriptor.unwrap()).unwrap();
         assert_eq!(block_info.hash(), genesis_block_hash());
 
-        let proof = db::AccountBalanceProof::decode_and_verify(
+        let proof = mpt::AccountBalanceProof::decode_and_verify(
             &payload,
             block_info.account_balances_root_hash(),
         )
         .unwrap();
-        assert_eq!(*proof.key(), account_address.to_fixed_bytes());
+        assert_eq!(*proof.key(), account_address);
         assert!(proof.value().is_none());
     }
 
@@ -626,7 +654,7 @@ mod tests {
 
         let response = client
             .get_account_balance(dotakon::GetAccountBalanceRequest {
-                account_address: Some(proto::h256_to_bytes32(account_address)),
+                account_address: Some(proto::pallas_scalar_to_bytes32(account_address)),
                 block_hash: None,
             })
             .await
@@ -645,12 +673,12 @@ mod tests {
         let block_info = db::BlockInfo::decode(&payload.block_descriptor.unwrap()).unwrap();
         assert_eq!(block_info.hash(), genesis_block_hash());
 
-        let proof = db::AccountBalanceProof::decode_and_verify(
+        let proof = mpt::AccountBalanceProof::decode_and_verify(
             &payload,
             block_info.account_balances_root_hash(),
         )
         .unwrap();
-        assert_eq!(*proof.key(), account_address.to_fixed_bytes());
+        assert_eq!(*proof.key(), account_address);
         assert!(proof.value().is_none());
     }
 
@@ -662,7 +690,7 @@ mod tests {
             client
                 .get_account_balance(dotakon::GetAccountBalanceRequest {
                     account_address: None,
-                    block_hash: Some(proto::h256_to_bytes32(genesis_block_hash())),
+                    block_hash: Some(proto::pallas_scalar_to_bytes32(genesis_block_hash())),
                 })
                 .await
                 .is_err()
