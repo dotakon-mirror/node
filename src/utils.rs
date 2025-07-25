@@ -6,9 +6,9 @@ use ff::PrimeField;
 use oid_registry::{Oid, OidEntry, OidRegistry, asn1_rs::oid};
 use pasta_curves::{
     group::GroupEncoding, pallas::Point as PointPallas, pallas::Scalar as ScalarPallas,
+    vesta::Point as PointVesta, vesta::Scalar as ScalarVesta,
 };
 use primitive_types::{H256, U256};
-use sha3::{self, Digest};
 
 pub const OID_DOTAKON_PALLAS_PUBLIC_KEY: Oid<'_> = oid!(1.3.6.1.4.1.71104.1);
 pub const OID_DOTAKON_IDENTITY_SIGNATURE_DUAL_SCHNORR: Oid<'_> = oid!(1.3.6.1.4.1.71104.2);
@@ -39,6 +39,10 @@ pub fn pallas_scalar_to_u256(scalar: ScalarPallas) -> U256 {
     U256::from_little_endian(&scalar.to_repr())
 }
 
+pub fn vesta_scalar_to_u256(scalar: ScalarVesta) -> U256 {
+    U256::from_little_endian(&scalar.to_repr())
+}
+
 pub fn c25519_scalar_to_u256(scalar: Scalar25519) -> U256 {
     U256::from_little_endian(&scalar.to_bytes())
 }
@@ -48,6 +52,11 @@ pub fn pallas_scalar_modulus() -> U256 {
     pallas_scalar_to_u256(max) + 1
 }
 
+pub fn vesta_scalar_modulus() -> U256 {
+    let max = ScalarVesta::zero() - ScalarVesta::one();
+    vesta_scalar_to_u256(max) + 1
+}
+
 pub fn c25519_scalar_modulus() -> U256 {
     let max = Scalar25519::ZERO - Scalar25519::ONE;
     c25519_scalar_to_u256(max) + 1
@@ -55,6 +64,10 @@ pub fn c25519_scalar_modulus() -> U256 {
 
 pub fn u256_to_pallas_scalar(value: U256) -> Result<ScalarPallas> {
     ScalarPallas::from_repr_vartime(value.to_little_endian()).context("invalid Pallas scalar")
+}
+
+pub fn u256_to_vesta_scalar(value: U256) -> Result<ScalarVesta> {
+    ScalarVesta::from_repr_vartime(value.to_little_endian()).context("invalid Vesta scalar")
 }
 
 pub fn u256_to_c25519_scalar(value: U256) -> Result<Scalar25519> {
@@ -71,12 +84,31 @@ pub fn c25519_scalar_to_pallas_scalar(scalar: Scalar25519) -> ScalarPallas {
     ScalarPallas::from_repr_vartime(scalar.to_bytes()).unwrap()
 }
 
+pub fn c25519_scalar_to_vesta_scalar(scalar: Scalar25519) -> ScalarVesta {
+    // The same rationale as `c25519_scalar_to_pallas_scalar` applies here. Vesta's scalar field is
+    // smaller than Pallas's but still larger than Curve25519's.
+    ScalarVesta::from_repr_vartime(scalar.to_bytes()).unwrap()
+}
+
+pub fn pallas_scalar_to_vesta_scalar(scalar: ScalarPallas) -> Result<ScalarVesta> {
+    ScalarVesta::from_repr_vartime(scalar.to_repr()).context("invalid Vesta scalar")
+}
+
+pub fn vesta_scalar_to_pallas_scalar(scalar: ScalarVesta) -> ScalarPallas {
+    // Pallas's scalar field is larger than Vesta's, so we can always unwrap.
+    ScalarPallas::from_repr_vartime(scalar.to_repr()).unwrap()
+}
+
 pub fn hash_to_c25519_scalar(value: H256) -> Scalar25519 {
     Scalar25519::hash_from_bytes::<sha3::Sha3_512>(&value.to_fixed_bytes())
 }
 
 pub fn hash_to_pallas_scalar(value: H256) -> ScalarPallas {
     c25519_scalar_to_pallas_scalar(hash_to_c25519_scalar(value))
+}
+
+pub fn hash_to_vesta_scalar(value: H256) -> ScalarVesta {
+    c25519_scalar_to_vesta_scalar(hash_to_c25519_scalar(value))
 }
 
 pub fn compress_point_pallas(point: &PointPallas) -> H256 {
@@ -87,6 +119,16 @@ pub fn decompress_point_pallas(point: H256) -> Result<PointPallas> {
     PointPallas::from_bytes(&point.to_fixed_bytes())
         .into_option()
         .context("invalid Pallas point")
+}
+
+pub fn compress_point_vesta(point: &PointVesta) -> H256 {
+    H256::from_slice(&point.to_bytes())
+}
+
+pub fn decompress_point_vesta(point: H256) -> Result<PointVesta> {
+    PointVesta::from_bytes(&point.to_fixed_bytes())
+        .into_option()
+        .context("invalid Vesta point")
 }
 
 pub fn compress_point_c25519(point: &Point25519) -> H256 {
@@ -103,6 +145,21 @@ pub fn decompress_point_c25519(value: H256) -> Result<Point25519> {
     Ok(point)
 }
 
+/// Converts the (Pallas) public key of an account to the corresponding wallet address.
+pub fn public_key_to_wallet_address(public_key: PointPallas) -> ScalarPallas {
+    hash_to_pallas_scalar(compress_point_pallas(&public_key))
+}
+
+pub fn format_wallet_address(wallet_address: ScalarPallas) -> String {
+    format!("{:#x}", pallas_scalar_to_u256(wallet_address))
+}
+
+/// Schnorr signature over the Pallas curve.
+///
+/// The hash algorithm used for the challenge hash is unspecified, and our code does use this struct
+/// with different algorithms: protobuf signatures for RPCs use Pasta's hash-to-scalar algorithm
+/// over SHA3-512, while all signatures that need to be verified on-chain (and the verification
+/// needs to be proven in Halo2) use Poseidon-128.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct SchnorrPallasSignature {
     pub nonce: PointPallas,
@@ -110,7 +167,7 @@ pub struct SchnorrPallasSignature {
 }
 
 impl SchnorrPallasSignature {
-    pub fn decode(bytes: &[u8; 64]) -> Result<SchnorrPallasSignature> {
+    pub fn decode(bytes: &[u8; 64]) -> Result<Self> {
         let nonce = decompress_point_pallas(H256::from_slice(&bytes[0..32]))?;
         let signature = u256_to_pallas_scalar(U256::from_little_endian(&bytes[32..64]))?;
         Ok(Self { nonce, signature })
@@ -191,22 +248,9 @@ impl VerifiableRandomness {
     }
 }
 
-/// Converts the (Pallas) public key of an account to the corresponding wallet address. Basically
-/// just a SHA3 hash.
-pub fn public_key_to_wallet_address(public_key: H256) -> H256 {
-    let mut hasher = sha3::Sha3_256::new();
-    hasher.update(public_key.to_fixed_bytes());
-    H256::from_slice(hasher.finalize().as_slice())
-}
-
-pub fn format_wallet_address(wallet_address: H256) -> String {
-    format!("{:#x}", wallet_address)
-}
-
-// TODO: make this production code?
+// TODO: make this production code? The same algorithm is employed in `KeyManager::new`.
 #[cfg(test)]
-fn make_test_keys(secret_key: &str) -> (H256, H256, H256) {
-    use ed25519_dalek;
+fn make_test_keys(secret_key: &str) -> (H256, PointPallas, Point25519) {
     use pasta_curves::group::Group;
     let secret_key = secret_key.parse::<H256>().unwrap();
     let signing_key = ed25519_dalek::SigningKey::from_bytes(&secret_key.to_fixed_bytes());
@@ -214,12 +258,7 @@ fn make_test_keys(secret_key: &str) -> (H256, H256, H256) {
     let public_key_pallas =
         PointPallas::generator() * c25519_scalar_to_pallas_scalar(private_key_25519);
     let public_key_25519 = Point25519::mul_base(&private_key_25519);
-    let compressed_pallas_key = compress_point_pallas(&public_key_pallas);
-    (
-        secret_key,
-        compressed_pallas_key,
-        compress_point_c25519(&public_key_25519),
-    )
+    (secret_key, public_key_pallas, public_key_25519)
 }
 
 /// WARNING: FOR TESTS ONLY, DO NOT use this key for anything else. They're leaked. If you create a
@@ -228,7 +267,7 @@ fn make_test_keys(secret_key: &str) -> (H256, H256, H256) {
 /// The three returned components are: the secret key, the public Pallas key, and the public
 /// Curve25519 key.
 #[cfg(test)]
-pub fn testing_keys1() -> (H256, H256, H256) {
+pub fn testing_keys1() -> (H256, PointPallas, Point25519) {
     make_test_keys("0x0b0276914bf0f850d27771adb1abb62b2674e041b63c86c8cd0d7520355ae7c0".into())
 }
 
@@ -238,15 +277,16 @@ pub fn testing_keys1() -> (H256, H256, H256) {
 /// The three returned components are: the secret key, the public Pallas key, and the public
 /// Curve25519 key.
 #[cfg(test)]
-pub fn testing_keys2() -> (H256, H256, H256) {
+pub fn testing_keys2() -> (H256, PointPallas, Point25519) {
     make_test_keys("0x0fc56ce55997c46f1ba0bce9a8a4daead405c29edf4066a2cd7d0419f592392b".into())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use ed25519_dalek;
+    use ff::Field;
     use pasta_curves::group::Group;
+
+    use super::*;
 
     #[test]
     fn test_custom_oids() {
@@ -269,6 +309,19 @@ mod tests {
     fn test_pallas_scalar_to_u256() {
         let scalar = ScalarPallas::from_raw([1u64, 2u64, 3u64, 4u64]);
         let value = pallas_scalar_to_u256(scalar);
+        assert_eq!(
+            value.to_little_endian(),
+            [
+                1u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 2u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8,
+                3u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 4u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8
+            ]
+        );
+    }
+
+    #[test]
+    fn test_vesta_scalar_to_u256() {
+        let scalar = ScalarVesta::from_raw([1u64, 2u64, 3u64, 4u64]);
+        let value = vesta_scalar_to_u256(scalar);
         assert_eq!(
             value.to_little_endian(),
             [
@@ -304,6 +357,14 @@ mod tests {
     }
 
     #[test]
+    fn test_vesta_scalar_modulus() {
+        assert_eq!(
+            format!("{:#x}", vesta_scalar_modulus()),
+            "0x40000000000000000000000000000000224698fc094cf91b992d30ed00000001"
+        );
+    }
+
+    #[test]
     fn test_c25519_scalar_modulus() {
         assert_eq!(
             format!("{:#x}", c25519_scalar_modulus()),
@@ -322,12 +383,31 @@ mod tests {
     }
 
     #[test]
+    fn test_u256_to_vesta_scalar() {
+        let value = U256::from_little_endian(&[
+            4u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 3u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 2u8,
+            0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 1u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8,
+        ]);
+        let scalar = u256_to_vesta_scalar(value).unwrap();
+        assert_eq!(scalar, ScalarVesta::from_raw([4u64, 3u64, 2u64, 1u64]));
+    }
+
+    #[test]
     fn test_pallas_range() {
         assert!(u256_to_pallas_scalar(pallas_scalar_modulus() - 2).is_ok());
         assert!(u256_to_pallas_scalar(pallas_scalar_modulus() - 1).is_ok());
         assert!(u256_to_pallas_scalar(pallas_scalar_modulus()).is_err());
         assert!(u256_to_pallas_scalar(pallas_scalar_modulus() + 1).is_err());
         assert!(u256_to_pallas_scalar(pallas_scalar_modulus() + 2).is_err());
+    }
+
+    #[test]
+    fn test_vesta_range() {
+        assert!(u256_to_vesta_scalar(vesta_scalar_modulus() - 2).is_ok());
+        assert!(u256_to_vesta_scalar(vesta_scalar_modulus() - 1).is_ok());
+        assert!(u256_to_vesta_scalar(vesta_scalar_modulus()).is_err());
+        assert!(u256_to_vesta_scalar(vesta_scalar_modulus() + 1).is_err());
+        assert!(u256_to_vesta_scalar(vesta_scalar_modulus() + 2).is_err());
     }
 
     #[test]
@@ -364,11 +444,65 @@ mod tests {
     }
 
     #[test]
+    fn test_c25519_scalar_to_vesta_scalar() {
+        let bytes = [
+            4u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 3u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 2u8,
+            0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 1u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8,
+        ];
+        let value = Scalar25519::from_canonical_bytes(bytes).unwrap();
+        assert_eq!(
+            c25519_scalar_to_vesta_scalar(value),
+            ScalarVesta::from_repr_vartime(bytes).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_pallas_scalar_to_vesta_scalar() {
+        let bytes = [
+            1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+            24, 25, 26, 27, 28, 29, 30, 0, 0,
+        ];
+        let value = ScalarPallas::from_repr_vartime(bytes).unwrap();
+        assert_eq!(
+            pallas_scalar_to_vesta_scalar(value).unwrap(),
+            ScalarVesta::from_repr_vartime(bytes).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_pallas_scalar_to_invalid_vesta_scalar() {
+        let value = ScalarPallas::ZERO - ScalarPallas::ONE;
+        assert!(pallas_scalar_to_vesta_scalar(value).is_err());
+    }
+
+    #[test]
+    fn test_vesta_scalar_to_pallas_scalar() {
+        let bytes = [
+            1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+            24, 25, 26, 27, 28, 29, 30, 0, 0,
+        ];
+        let value = ScalarVesta::from_repr_vartime(bytes).unwrap();
+        assert_eq!(
+            vesta_scalar_to_pallas_scalar(value),
+            ScalarPallas::from_repr_vartime(bytes).unwrap()
+        );
+    }
+
+    #[test]
     fn test_max_scalar() {
-        assert!(c25519_scalar_modulus() < pallas_scalar_modulus());
+        assert!(c25519_scalar_modulus() < vesta_scalar_modulus());
+        assert!(vesta_scalar_modulus() < pallas_scalar_modulus());
+        assert_eq!(
+            u256_to_vesta_scalar(c25519_scalar_modulus() - 1).unwrap(),
+            c25519_scalar_to_vesta_scalar(Scalar25519::ZERO - Scalar25519::ONE)
+        );
         assert_eq!(
             u256_to_pallas_scalar(c25519_scalar_modulus() - 1).unwrap(),
             c25519_scalar_to_pallas_scalar(Scalar25519::ZERO - Scalar25519::ONE)
+        );
+        assert_eq!(
+            u256_to_pallas_scalar(vesta_scalar_modulus() - 1).unwrap(),
+            vesta_scalar_to_pallas_scalar(ScalarVesta::ZERO - ScalarVesta::ONE)
         );
     }
 
@@ -431,7 +565,7 @@ mod tests {
         let wallet_address = public_key_to_wallet_address(public_key);
         assert_eq!(
             format_wallet_address(wallet_address),
-            "0x5fc617e297c12d140feea17c55eec6ceaf25af3c47051353bf81cafdad4a8c7a"
+            "0x6ae6a7e26acd5c4a5f568d9e3673b899ef04a330033ccd64f1c269420d192a7"
         );
     }
 
@@ -441,7 +575,7 @@ mod tests {
         let wallet_address = public_key_to_wallet_address(public_key);
         assert_eq!(
             format_wallet_address(wallet_address),
-            "0xa2b8a7f12136a5199d83ec51ac4654cfe01afa2456391869a3d6915a0fd97550"
+            "0xbe96bcdb2dddde2ef73530317b9d4a4f9479ffb69eaccfec6b8b35c59a3294"
         );
     }
 

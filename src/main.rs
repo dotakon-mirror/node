@@ -14,7 +14,6 @@ mod net;
 mod proto;
 mod service;
 mod ssl;
-mod topology;
 mod utils;
 mod version;
 
@@ -116,7 +115,7 @@ async fn main() -> Result<()> {
             args.public_address.as_str(),
             args.grpc_port,
             args.http_port,
-        )?));
+        )));
 
     let local_address = format!("{}:{}", args.local_address, args.grpc_port);
     println!("listening on {}", local_address);
