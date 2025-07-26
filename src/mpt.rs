@@ -59,8 +59,7 @@ fn key_nibble_by_char(ch: char) -> u8 {
 /// Hex string encoder that can be used by `KeyEncoder` implementations.
 pub fn encode_key<const L: usize>(bytes: &[u8; L]) -> String {
     let mut key = String::default();
-    for i in 0..L {
-        let byte = bytes[i];
+    for byte in bytes {
         key.push(key_char_by_nibble(byte >> 4));
         key.push(key_char_by_nibble(byte & 15));
     }
@@ -199,7 +198,7 @@ impl<K: Copy, V: PoseidonHash + proto::AnyProto, E: Encoder<K, L>, const L: usiz
     ) -> Result<dotakon::MerkleProof> {
         Ok(dotakon::MerkleProof {
             block_descriptor: Some(block_descriptor),
-            key: Some(E::encode_key(self.key.clone())),
+            key: Some(E::encode_key(self.key)),
             value: match &self.value {
                 Some(value) => Some(value.encode_to_any()?),
                 None => None,
@@ -260,7 +259,7 @@ impl<K: Copy, V: PoseidonHash + proto::AnyProto, E: Encoder<K, L>, const L: usiz
             value,
             path,
             root_hash,
-            _encoder: PhantomData::default(),
+            _encoder: PhantomData {},
         })
     }
 
@@ -354,7 +353,7 @@ impl<
         Self {
             children,
             hash,
-            _encoder: PhantomData::default(),
+            _encoder: PhantomData {},
         }
     }
 
@@ -452,7 +451,7 @@ impl<
         Self {
             children: BTreeMap::default(),
             hash: hash_flat_node::<E, L, L16>(&BTreeMap::default()),
-            _encoder: PhantomData::default(),
+            _encoder: PhantomData {},
         }
     }
 }
@@ -507,7 +506,7 @@ impl<
             value: value.cloned(),
             path,
             root_hash: root.poseidon_hash(),
-            _encoder: PhantomData::default(),
+            _encoder: PhantomData {},
         }
     }
 
@@ -531,7 +530,7 @@ impl<
     fn default() -> Self {
         Self {
             roots: BTreeMap::from([(0, InternalNode::<V, E, L, L16>::default())]),
-            _key: PhantomData::default(),
+            _key: PhantomData {},
         }
     }
 }

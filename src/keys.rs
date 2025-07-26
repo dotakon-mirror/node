@@ -334,7 +334,7 @@ impl KeyManager {
         message: ScalarPallas,
     ) -> ScalarPallas {
         let (pkx, pky, pkz) = Self::pallas_point_to_pallas_coordinates(public_key);
-        let (nx, ny, nz) = Self::pallas_point_to_pallas_coordinates(&nonce);
+        let (nx, ny, nz) = Self::pallas_point_to_pallas_coordinates(nonce);
         let hasher = PoseidonHash::<ScalarPallas, P128Pow5T3, ConstantLength<7>, 3, 2>::init();
         hasher.hash([pkx, pky, pkz, nx, ny, nz, message])
     }
