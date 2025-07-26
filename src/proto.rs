@@ -32,6 +32,7 @@ macro_rules! dotakon_proto_name {
 }
 
 dotakon_proto_name!(dotakon::BlockDescriptor, "BlockDescriptor");
+dotakon_proto_name!(dotakon::BoundTransaction, "BoundTransaction");
 dotakon_proto_name!(dotakon::Bytes32, "Bytes32");
 dotakon_proto_name!(dotakon::MerkleProof, "MerkleProof");
 dotakon_proto_name!(dotakon::node_identity::Payload, "NodeIdentity.Payload");

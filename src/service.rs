@@ -8,7 +8,7 @@ use crate::proto;
 use crate::utils;
 use crate::version;
 use anyhow::Context;
-use pasta_curves::{pallas::Point as PointPallas, pallas::Scalar as ScalarPallas};
+use pasta_curves::{pallas::Point, pallas::Scalar};
 use primitive_types::H256;
 use rand_core::{OsRng, TryRngCore};
 use std::pin::Pin;
@@ -90,7 +90,7 @@ impl NodeService {
         }
     }
 
-    fn get_client_public_key<M>(&self, request: &Request<M>) -> anyhow::Result<PointPallas> {
+    fn get_client_public_key<M>(&self, request: &Request<M>) -> anyhow::Result<Point> {
         let info = request
             .extensions()
             .get::<net::ConnectionInfo>()
@@ -98,7 +98,7 @@ impl NodeService {
         Ok(info.peer_public_key())
     }
 
-    fn get_client_wallet_address<M>(&self, request: &Request<M>) -> anyhow::Result<ScalarPallas> {
+    fn get_client_wallet_address<M>(&self, request: &Request<M>) -> anyhow::Result<Scalar> {
         let info = request
             .extensions()
             .get::<net::ConnectionInfo>()
@@ -226,12 +226,37 @@ impl NodeServiceV1 for NodeService {
 
     async fn get_transaction(
         &self,
-        _request: Request<dotakon::GetTransactionRequest>,
+        request: Request<dotakon::GetTransactionRequest>,
     ) -> Result<Response<dotakon::GetTransactionResponse>, Status> {
-        Ok(Response::new(dotakon::GetTransactionResponse {
-            payload: None,
-            signature: None,
-        }))
+        let transaction_hash = match request.get_ref().transaction_hash {
+            Some(hash) => proto::pallas_scalar_from_bytes32(&hash)
+                .map_err(|_| Status::invalid_argument("invalid transaction hash"))?,
+            None => return Err(Status::invalid_argument("transaction hash field missing")),
+        };
+        match self.db.get_transaction(transaction_hash) {
+            Some(transaction) => {
+                let (payload, signature) = self
+                    .key_manager
+                    .sign_message(
+                        &dotakon::BoundTransaction {
+                            parent_transaction_hash: Some(proto::pallas_scalar_to_bytes32(
+                                transaction.parent_hash(),
+                            )),
+                            transaction: Some(transaction.diff()),
+                        },
+                        get_random(),
+                    )
+                    .map_err(|_| Status::internal("internal error"))?;
+                Ok(Response::new(dotakon::GetTransactionResponse {
+                    payload: Some(payload),
+                    signature: Some(signature),
+                }))
+            }
+            None => Err(Status::not_found(format!(
+                "transaction hash {:#x} not found",
+                utils::pallas_scalar_to_u256(transaction_hash)
+            ))),
+        }
     }
 
     async fn get_account_balance(
@@ -392,7 +417,7 @@ mod tests {
         }
     }
 
-    fn genesis_block_hash() -> ScalarPallas {
+    fn genesis_block_hash() -> Scalar {
         utils::u256_to_pallas_scalar(
             "0x14a050f00de903b1f6c1d65a414ff0fa01733f0216eb1fe083174ddd1c4e45ea"
                 .parse()
@@ -475,7 +500,7 @@ mod tests {
         assert_eq!(payload.block_number.unwrap(), 0);
         assert_eq!(
             proto::pallas_scalar_from_bytes32(&payload.previous_block_hash.unwrap()).unwrap(),
-            ScalarPallas::ZERO
+            Scalar::ZERO
         );
         assert!(payload.network_topology_root_hash.is_none());
         assert_eq!(
@@ -518,7 +543,7 @@ mod tests {
         assert_eq!(payload.block_number.unwrap(), 0);
         assert_eq!(
             proto::pallas_scalar_from_bytes32(&payload.previous_block_hash.unwrap()).unwrap(),
-            ScalarPallas::ZERO
+            Scalar::ZERO
         );
         assert!(payload.network_topology_root_hash.is_none());
         assert_eq!(
@@ -655,6 +680,34 @@ mod tests {
                 .get_account_balance(dotakon::GetAccountBalanceRequest {
                     account_address: None,
                     block_hash: None,
+                })
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_invalid_transaction_lookup() {
+        let mut fixture = TestFixture::with_default_location().await.unwrap();
+        let client = &mut fixture.client;
+        assert!(
+            client
+                .get_transaction(dotakon::GetTransactionRequest {
+                    transaction_hash: None,
+                })
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_unknown_transaction() {
+        let mut fixture = TestFixture::with_default_location().await.unwrap();
+        let client = &mut fixture.client;
+        assert!(
+            client
+                .get_transaction(dotakon::GetTransactionRequest {
+                    transaction_hash: Some(proto::h256_to_bytes32(H256::zero())),
                 })
                 .await
                 .is_err()
