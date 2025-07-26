@@ -120,6 +120,23 @@ impl NodeService {
         keys::KeyManager::verify_signed_message(payload, signature)
     }
 
+    fn get_block_impl(&self, request: &dotakon::GetBlockRequest) -> Result<db::BlockInfo, Status> {
+        match request.block_hash {
+            Some(block_hash) => {
+                let block_hash = proto::pallas_scalar_from_bytes32(&block_hash)
+                    .map_err(|_| Status::invalid_argument("invalid block hash"))?;
+                self.db
+                    .get_block_by_hash(block_hash)
+                    .context(format!(
+                        "block hash {:#x} not found",
+                        utils::pallas_scalar_to_u256(block_hash)
+                    ))
+                    .map_err(|error| Status::not_found(error.to_string()))
+            }
+            None => Ok(self.db.get_latest_block()),
+        }
+    }
+
     fn get_account_balance_impl(
         &self,
         request: &dotakon::GetAccountBalanceRequest,
@@ -131,25 +148,26 @@ impl NodeService {
                 .map_err(|error| Status::invalid_argument(error.to_string()))?,
         )
         .map_err(|_| Status::invalid_argument("invalid account address"))?;
-        if let Some(block_hash) = request.block_hash {
-            let block_hash = proto::pallas_scalar_from_bytes32(&block_hash)
-                .map_err(|_| Status::invalid_argument("invalid block hash"))?;
-            self.db
-                .get_balance(account_address, block_hash)
-                .map_err(|_| {
-                    Status::not_found(format!(
-                        "account address {:#x} not found at block {:#x}",
-                        utils::pallas_scalar_to_u256(account_address),
-                        utils::pallas_scalar_to_u256(block_hash)
-                    ))
-                })
-        } else {
-            self.db.get_latest_balance(account_address).map_err(|_| {
+        match request.block_hash {
+            Some(block_hash) => {
+                let block_hash = proto::pallas_scalar_from_bytes32(&block_hash)
+                    .map_err(|_| Status::invalid_argument("invalid block hash"))?;
+                self.db
+                    .get_balance(account_address, block_hash)
+                    .map_err(|_| {
+                        Status::not_found(format!(
+                            "account address {:#x} not found at block {:#x}",
+                            utils::pallas_scalar_to_u256(account_address),
+                            utils::pallas_scalar_to_u256(block_hash)
+                        ))
+                    })
+            }
+            None => self.db.get_latest_balance(account_address).map_err(|_| {
                 Status::not_found(format!(
                     "account address {:#x} not found",
                     utils::pallas_scalar_to_u256(account_address)
                 ))
-            })
+            }),
         }
     }
 }
@@ -171,11 +189,31 @@ impl NodeServiceV1 for NodeService {
 
     async fn get_block(
         &self,
-        _request: Request<dotakon::GetBlockRequest>,
+        request: Request<dotakon::GetBlockRequest>,
     ) -> Result<Response<dotakon::GetBlockResponse>, Status> {
+        let block_info = self.get_block_impl(request.get_ref())?;
+        let descriptor = dotakon::BlockDescriptor {
+            block_hash: Some(proto::pallas_scalar_to_bytes32(block_info.hash())),
+            block_number: Some(block_info.number()),
+            previous_block_hash: Some(proto::pallas_scalar_to_bytes32(
+                block_info.previous_block_hash(),
+            )),
+            timestamp: Some(block_info.timestamp().into()),
+            network_topology_root_hash: None,
+            last_transaction_hash: Some(proto::pallas_scalar_to_bytes32(
+                block_info.last_transaction_hash(),
+            )),
+            account_balances_root_hash: Some(proto::pallas_scalar_to_bytes32(
+                block_info.account_balances_root_hash(),
+            )),
+            program_storage_root_hash: None,
+        };
+        let (payload, signature) = self
+            .sign_message(&descriptor)
+            .map_err(|_| Status::internal("signature error"))?;
         Ok(Response::new(dotakon::GetBlockResponse {
-            payload: None,
-            signature: None,
+            payload: Some(payload),
+            signature: Some(signature),
         }))
     }
 
@@ -248,6 +286,7 @@ mod tests {
     };
     use crate::net;
     use crate::ssl;
+    use ff::Field;
     use std::time::Duration;
     use tokio::sync::Notify;
     use tokio::task::JoinHandle;
@@ -353,6 +392,15 @@ mod tests {
         }
     }
 
+    fn genesis_block_hash() -> ScalarPallas {
+        utils::u256_to_pallas_scalar(
+            "0x14a050f00de903b1f6c1d65a414ff0fa01733f0216eb1fe083174ddd1c4e45ea"
+                .parse()
+                .unwrap(),
+        )
+        .unwrap()
+    }
+
     #[tokio::test]
     async fn test_identity() {
         let mut fixture = TestFixture::with_default_location().await.unwrap();
@@ -396,6 +444,221 @@ mod tests {
         assert_eq!(payload.network_address.unwrap(), "localhost");
         assert_eq!(payload.grpc_port.unwrap(), 4443u32);
         assert_eq!(payload.http_port.unwrap(), 8080u32);
+    }
+
+    #[tokio::test]
+    async fn test_get_genesis_block() {
+        let mut fixture = TestFixture::with_default_location().await.unwrap();
+        let client = &mut fixture.client;
+
+        let response = client
+            .get_block(dotakon::GetBlockRequest {
+                block_hash: Some(proto::pallas_scalar_to_bytes32(genesis_block_hash())),
+            })
+            .await
+            .unwrap();
+        let response = response.get_ref();
+        let payload = response.payload.as_ref().unwrap();
+        assert!(
+            keys::KeyManager::verify_signed_message(
+                &payload,
+                &response.signature.as_ref().unwrap()
+            )
+            .is_ok()
+        );
+        let payload = payload.to_msg::<dotakon::BlockDescriptor>().unwrap();
+
+        assert_eq!(
+            proto::pallas_scalar_from_bytes32(&payload.block_hash.unwrap()).unwrap(),
+            genesis_block_hash()
+        );
+        assert_eq!(payload.block_number.unwrap(), 0);
+        assert_eq!(
+            proto::pallas_scalar_from_bytes32(&payload.previous_block_hash.unwrap()).unwrap(),
+            ScalarPallas::ZERO
+        );
+        assert!(payload.network_topology_root_hash.is_none());
+        assert_eq!(
+            proto::pallas_scalar_from_bytes32(&payload.account_balances_root_hash.unwrap())
+                .unwrap(),
+            utils::u256_to_pallas_scalar(
+                "0x375830d6862157562431f637dcb4aa91e2bba7220abfa58b7618a713e9bb8803"
+                    .parse()
+                    .unwrap()
+            )
+            .unwrap()
+        );
+        assert!(payload.program_storage_root_hash.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_get_latest_block_at_genesis() {
+        let mut fixture = TestFixture::with_default_location().await.unwrap();
+        let client = &mut fixture.client;
+
+        let response = client
+            .get_block(dotakon::GetBlockRequest { block_hash: None })
+            .await
+            .unwrap();
+        let response = response.get_ref();
+        let payload = response.payload.as_ref().unwrap();
+        assert!(
+            keys::KeyManager::verify_signed_message(
+                &payload,
+                &response.signature.as_ref().unwrap()
+            )
+            .is_ok()
+        );
+        let payload = payload.to_msg::<dotakon::BlockDescriptor>().unwrap();
+
+        assert_eq!(
+            proto::pallas_scalar_from_bytes32(&payload.block_hash.unwrap()).unwrap(),
+            genesis_block_hash()
+        );
+        assert_eq!(payload.block_number.unwrap(), 0);
+        assert_eq!(
+            proto::pallas_scalar_from_bytes32(&payload.previous_block_hash.unwrap()).unwrap(),
+            ScalarPallas::ZERO
+        );
+        assert!(payload.network_topology_root_hash.is_none());
+        assert_eq!(
+            proto::pallas_scalar_from_bytes32(&payload.account_balances_root_hash.unwrap())
+                .unwrap(),
+            utils::u256_to_pallas_scalar(
+                "0x375830d6862157562431f637dcb4aa91e2bba7220abfa58b7618a713e9bb8803"
+                    .parse()
+                    .unwrap()
+            )
+            .unwrap()
+        );
+        assert!(payload.program_storage_root_hash.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_get_unknown_block() {
+        let mut fixture = TestFixture::with_default_location().await.unwrap();
+        let client = &mut fixture.client;
+        assert!(
+            client
+                .get_block(dotakon::GetBlockRequest {
+                    block_hash: Some(proto::pallas_scalar_to_bytes32(
+                        utils::u256_to_pallas_scalar(
+                            "0x375830d6862157562431f637dcb4aa91e2bba7220abfa58b7618a713e9bb8803"
+                                .parse()
+                                .unwrap()
+                        )
+                        .unwrap(),
+                    )),
+                })
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_initial_account_balance() {
+        let mut fixture = TestFixture::with_default_location().await.unwrap();
+        let client = &mut fixture.client;
+
+        let (_, public_key, _) = utils::testing_keys1();
+        let account_address = utils::public_key_to_wallet_address(public_key);
+
+        let response = client
+            .get_account_balance(dotakon::GetAccountBalanceRequest {
+                account_address: Some(proto::pallas_scalar_to_bytes32(account_address)),
+                block_hash: Some(proto::pallas_scalar_to_bytes32(genesis_block_hash())),
+            })
+            .await
+            .unwrap();
+        let response = response.get_ref();
+        let payload = response.payload.as_ref().unwrap();
+        assert!(
+            keys::KeyManager::verify_signed_message(
+                &payload,
+                &response.signature.as_ref().unwrap()
+            )
+            .is_ok()
+        );
+        let payload = payload.to_msg::<dotakon::MerkleProof>().unwrap();
+
+        let block_info = db::BlockInfo::decode(&payload.block_descriptor.unwrap()).unwrap();
+        assert_eq!(block_info.hash(), genesis_block_hash());
+
+        let proof = mpt::AccountBalanceProof::decode_and_verify(
+            &payload,
+            block_info.account_balances_root_hash(),
+        )
+        .unwrap();
+        assert_eq!(*proof.key(), account_address);
+        assert!(proof.value().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_get_latest_account_balance_at_genesis() {
+        let mut fixture = TestFixture::with_default_location().await.unwrap();
+        let client = &mut fixture.client;
+
+        let (_, public_key, _) = utils::testing_keys1();
+        let account_address = utils::public_key_to_wallet_address(public_key);
+
+        let response = client
+            .get_account_balance(dotakon::GetAccountBalanceRequest {
+                account_address: Some(proto::pallas_scalar_to_bytes32(account_address)),
+                block_hash: None,
+            })
+            .await
+            .unwrap();
+        let response = response.get_ref();
+        let payload = response.payload.as_ref().unwrap();
+        assert!(
+            keys::KeyManager::verify_signed_message(
+                &payload,
+                &response.signature.as_ref().unwrap()
+            )
+            .is_ok()
+        );
+        let payload = payload.to_msg::<dotakon::MerkleProof>().unwrap();
+
+        let block_info = db::BlockInfo::decode(&payload.block_descriptor.unwrap()).unwrap();
+        assert_eq!(block_info.hash(), genesis_block_hash());
+
+        let proof = mpt::AccountBalanceProof::decode_and_verify(
+            &payload,
+            block_info.account_balances_root_hash(),
+        )
+        .unwrap();
+        assert_eq!(*proof.key(), account_address);
+        assert!(proof.value().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_get_invalid_account_balance1() {
+        let mut fixture = TestFixture::with_default_location().await.unwrap();
+        let client = &mut fixture.client;
+        assert!(
+            client
+                .get_account_balance(dotakon::GetAccountBalanceRequest {
+                    account_address: None,
+                    block_hash: Some(proto::pallas_scalar_to_bytes32(genesis_block_hash())),
+                })
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_invalid_account_balance2() {
+        let mut fixture = TestFixture::with_default_location().await.unwrap();
+        let client = &mut fixture.client;
+        assert!(
+            client
+                .get_account_balance(dotakon::GetAccountBalanceRequest {
+                    account_address: None,
+                    block_hash: None,
+                })
+                .await
+                .is_err()
+        );
     }
 
     // TODO
