@@ -20,6 +20,12 @@ pub trait PoseidonHash {
     fn poseidon_hash(&self) -> Scalar;
 }
 
+impl PoseidonHash for u64 {
+    fn poseidon_hash(&self) -> Scalar {
+        utils::poseidon_hash([(*self).into()])
+    }
+}
+
 impl PoseidonHash for Scalar {
     fn poseidon_hash(&self) -> Scalar {
         utils::poseidon_hash([*self])
@@ -589,8 +595,8 @@ impl NodeEncoder<3> for ProgramStorageKeyEncoder {
 
 impl Encoder<(Scalar, u64), 3> for ProgramStorageKeyEncoder {}
 
-pub type ProgramStorageTree = Tree<(Scalar, u64), Scalar, ProgramStorageKeyEncoder, 3, 48>;
-pub type ProgramStorageProof = Proof<(Scalar, u64), Scalar, ProgramStorageKeyEncoder, 3, 48>;
+pub type ProgramStorageTree = Tree<(Scalar, u64), u64, ProgramStorageKeyEncoder, 3, 48>;
+pub type ProgramStorageProof = Proof<(Scalar, u64), u64, ProgramStorageKeyEncoder, 3, 48>;
 
 #[cfg(test)]
 mod tests {
