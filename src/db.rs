@@ -1,9 +1,9 @@
 use crate::clock::Clock;
 use crate::dotakon;
 use crate::keys;
-use crate::mpt;
 use crate::proto;
 use crate::topology;
+use crate::tree;
 use crate::utils;
 use anyhow::{Context, Result, anyhow};
 use ff::Field;
@@ -309,7 +309,7 @@ impl Transaction {
     }
 }
 
-impl mpt::PoseidonHash for Transaction {
+impl tree::PoseidonHash for Transaction {
     fn poseidon_hash(&self) -> Scalar {
         self.hash
     }
@@ -317,8 +317,8 @@ impl mpt::PoseidonHash for Transaction {
 
 fn make_genesis_block(timestamp: SystemTime, network_topology_root_hash: Scalar) -> BlockInfo {
     let block_number = 0;
-    let account_balances_root_hash = mpt::AccountBalanceTree::default().root_hash(block_number);
-    let program_storage_root_hash = mpt::ProgramStorageTree::default().root_hash(block_number);
+    let account_balances_root_hash = tree::AccountBalanceTree::default().root_hash(block_number);
+    let program_storage_root_hash = tree::ProgramStorageTree::default().root_hash(block_number);
     BlockInfo::new(
         block_number,
         Scalar::ZERO,
@@ -335,8 +335,8 @@ struct Repr {
     block_numbers_by_hash: BTreeMap<Scalar, usize>,
     network_topologies: BTreeMap<u64, topology::Network>,
     transactions: BTreeMap<Scalar, Transaction>,
-    account_balances: mpt::AccountBalanceTree,
-    program_storage: mpt::ProgramStorageTree,
+    account_balances: tree::AccountBalanceTree,
+    program_storage: tree::ProgramStorageTree,
 }
 
 impl Repr {
@@ -348,8 +348,8 @@ impl Repr {
             block_numbers_by_hash: BTreeMap::from([(genesis_block.hash, 0)]),
             network_topologies: BTreeMap::from([(0, network)]),
             transactions: BTreeMap::new(),
-            account_balances: mpt::AccountBalanceTree::default(),
-            program_storage: mpt::ProgramStorageTree::default(),
+            account_balances: tree::AccountBalanceTree::default(),
+            program_storage: tree::ProgramStorageTree::default(),
         })
     }
 
@@ -385,7 +385,7 @@ impl Repr {
         &self,
         account_address: Scalar,
         block_hash: Scalar,
-    ) -> Result<(BlockInfo, mpt::AccountBalanceProof)> {
+    ) -> Result<(BlockInfo, tree::AccountBalanceProof)> {
         match self.get_block_by_hash(block_hash) {
             Some(block) => Ok((
                 block,
@@ -399,7 +399,7 @@ impl Repr {
     fn get_latest_balance(
         &self,
         account_address: Scalar,
-    ) -> Result<(BlockInfo, mpt::AccountBalanceProof)> {
+    ) -> Result<(BlockInfo, tree::AccountBalanceProof)> {
         let block = self.get_latest_block();
         Ok((
             block,
@@ -447,7 +447,7 @@ impl Db {
         &self,
         account_address: Scalar,
         block_hash: Scalar,
-    ) -> Result<(BlockInfo, mpt::AccountBalanceProof)> {
+    ) -> Result<(BlockInfo, tree::AccountBalanceProof)> {
         self.repr
             .lock()
             .unwrap()
@@ -457,7 +457,7 @@ impl Db {
     pub fn get_latest_balance(
         &self,
         account_address: Scalar,
-    ) -> Result<(BlockInfo, mpt::AccountBalanceProof)> {
+    ) -> Result<(BlockInfo, tree::AccountBalanceProof)> {
         self.repr
             .lock()
             .unwrap()
@@ -470,7 +470,7 @@ mod tests {
     use super::*;
     use crate::clock::test::MockClock;
     use crate::keys;
-    use crate::mpt::PoseidonHash;
+    use crate::tree::PoseidonHash;
     use crate::utils;
     use crate::version;
     use ff::PrimeField;
@@ -523,7 +523,7 @@ mod tests {
 
     fn genesis_block_hash() -> Scalar {
         utils::u256_to_pallas_scalar(
-            "0x0040432efa8475c5694a17712f677108a6fbe623a977f99802ebedc0f17afe91"
+            "0x29f44c06810e85bef05ced93d17dce8f1786c073972c0591e09f63c9d916380d"
                 .parse()
                 .unwrap(),
         )
@@ -607,13 +607,13 @@ mod tests {
         assert_eq!(
             block.account_balances_root_hash(),
             utils::parse_pallas_scalar(
-                "0x375830d6862157562431f637dcb4aa91e2bba7220abfa58b7618a713e9bb8803"
+                "0x3eff13934bf9e1844f467dc1fe60c686da504238cfaee6c4e63ada8891727491"
             )
         );
         assert_eq!(
             block.program_storage_root_hash(),
             utils::parse_pallas_scalar(
-                "0x22eb7ecec06c24f54d23ed5098b765d728698f22a5749a7404ba055475fa296d"
+                "0x1a8ee4b1540cb3b9e99bf844f0b4dc321aa0a57bdfea7850b3632446e56d00fe"
             )
         );
         assert_eq!(BlockInfo::decode(&block.encode()).unwrap(), block);
@@ -822,8 +822,8 @@ mod tests {
         let account_address = utils::public_key_to_wallet_address(public_key);
         let (block, proof) = db.get_latest_balance(account_address).unwrap();
         assert_eq!(block.hash(), genesis_block_hash());
-        assert_eq!(*proof.key(), account_address);
-        assert!(proof.value().is_none());
+        assert_eq!(proof.key(), account_address);
+        assert_eq!(proof.value_as_scalar(), Scalar::ZERO);
     }
 
     #[test]
@@ -846,8 +846,8 @@ mod tests {
             .get_balance(account_address, genesis_block_hash())
             .unwrap();
         assert_eq!(block.hash(), genesis_block_hash());
-        assert_eq!(*proof.key(), account_address);
-        assert!(proof.value().is_none());
+        assert_eq!(proof.key(), account_address);
+        assert_eq!(proof.value_as_scalar(), Scalar::ZERO);
     }
 
     #[test]

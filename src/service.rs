@@ -2,9 +2,9 @@ use crate::clock::Clock;
 use crate::db;
 use crate::dotakon::{self, node_service_v1_server::NodeServiceV1};
 use crate::keys;
-use crate::mpt;
 use crate::net;
 use crate::proto;
+use crate::tree;
 use crate::utils;
 use crate::version;
 use anyhow::Context;
@@ -148,7 +148,7 @@ impl NodeService {
     fn get_account_balance_impl(
         &self,
         request: &dotakon::GetAccountBalanceRequest,
-    ) -> Result<(db::BlockInfo, mpt::AccountBalanceProof), Status> {
+    ) -> Result<(db::BlockInfo, tree::AccountBalanceProof), Status> {
         let account_address = proto::pallas_scalar_from_bytes32(
             &request
                 .account_address
@@ -434,7 +434,7 @@ mod tests {
 
     fn genesis_block_hash() -> Scalar {
         utils::u256_to_pallas_scalar(
-            "0x0040432efa8475c5694a17712f677108a6fbe623a977f99802ebedc0f17afe91"
+            "0x29f44c06810e85bef05ced93d17dce8f1786c073972c0591e09f63c9d916380d"
                 .parse()
                 .unwrap(),
         )
@@ -528,13 +528,13 @@ mod tests {
             proto::pallas_scalar_from_bytes32(&payload.account_balances_root_hash.unwrap())
                 .unwrap(),
             utils::parse_pallas_scalar(
-                "0x375830d6862157562431f637dcb4aa91e2bba7220abfa58b7618a713e9bb8803"
+                "0x3eff13934bf9e1844f467dc1fe60c686da504238cfaee6c4e63ada8891727491"
             )
         );
         assert_eq!(
             proto::pallas_scalar_from_bytes32(&payload.program_storage_root_hash.unwrap()).unwrap(),
             utils::parse_pallas_scalar(
-                "0x22eb7ecec06c24f54d23ed5098b765d728698f22a5749a7404ba055475fa296d"
+                "0x1a8ee4b1540cb3b9e99bf844f0b4dc321aa0a57bdfea7850b3632446e56d00fe"
             )
         );
     }
@@ -579,13 +579,13 @@ mod tests {
             proto::pallas_scalar_from_bytes32(&payload.account_balances_root_hash.unwrap())
                 .unwrap(),
             utils::parse_pallas_scalar(
-                "0x375830d6862157562431f637dcb4aa91e2bba7220abfa58b7618a713e9bb8803"
+                "0x3eff13934bf9e1844f467dc1fe60c686da504238cfaee6c4e63ada8891727491"
             )
         );
         assert_eq!(
             proto::pallas_scalar_from_bytes32(&payload.program_storage_root_hash.unwrap()).unwrap(),
             utils::parse_pallas_scalar(
-                "0x22eb7ecec06c24f54d23ed5098b765d728698f22a5749a7404ba055475fa296d"
+                "0x1a8ee4b1540cb3b9e99bf844f0b4dc321aa0a57bdfea7850b3632446e56d00fe"
             )
         );
     }
@@ -635,13 +635,13 @@ mod tests {
         let block_info = db::BlockInfo::decode(&payload.block_descriptor.unwrap()).unwrap();
         assert_eq!(block_info.hash(), genesis_block_hash());
 
-        let proof = mpt::AccountBalanceProof::decode_and_verify(
+        let proof = tree::AccountBalanceProof::decode_and_verify(
             &payload,
             block_info.account_balances_root_hash(),
         )
         .unwrap();
-        assert_eq!(*proof.key(), account_address);
-        assert!(proof.value().is_none());
+        assert_eq!(proof.key(), account_address);
+        assert_eq!(proof.value_as_scalar(), Scalar::ZERO);
     }
 
     #[tokio::test]
@@ -673,13 +673,13 @@ mod tests {
         let block_info = db::BlockInfo::decode(&payload.block_descriptor.unwrap()).unwrap();
         assert_eq!(block_info.hash(), genesis_block_hash());
 
-        let proof = mpt::AccountBalanceProof::decode_and_verify(
+        let proof = tree::AccountBalanceProof::decode_and_verify(
             &payload,
             block_info.account_balances_root_hash(),
         )
         .unwrap();
-        assert_eq!(*proof.key(), account_address);
-        assert!(proof.value().is_none());
+        assert_eq!(proof.key(), account_address);
+        assert_eq!(proof.value_as_scalar(), Scalar::ZERO);
     }
 
     #[tokio::test]

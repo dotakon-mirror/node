@@ -309,6 +309,33 @@ pub fn testing_keys2() -> (H256, PointPallas, Point25519) {
 }
 
 #[cfg(test)]
+pub mod test {
+    use anyhow::{Result, anyhow};
+    use halo2_proofs::{dev::MockProver, plonk::Circuit};
+    use pasta_curves::pallas::Scalar;
+
+    pub fn verify_circuit<C: Circuit<Scalar>>(
+        k: u32,
+        circuit: &C,
+        instance: Vec<Vec<Scalar>>,
+    ) -> Result<()> {
+        let prover_or_error = MockProver::run(k, circuit, instance);
+        if let Err(error) = prover_or_error {
+            print!("{}\n", error);
+            return Err(anyhow!(error));
+        }
+        let prover = prover_or_error.unwrap();
+        if let Err(errors) = prover.verify() {
+            for error in errors {
+                print!("{}\n", error);
+            }
+            return Err(anyhow!("verification failed"));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use ff::Field;
     use pasta_curves::group::Group;
@@ -699,6 +726,43 @@ mod tests {
         assert_eq!(
             format_wallet_address(wallet_address),
             "0xfaeebcf2265e3495304715025f968b1ed8350dde25187ba383469571fd50348"
+        );
+    }
+
+    #[test]
+    fn test_poseidon_one_input() {
+        assert_eq!(
+            poseidon_hash([parse_pallas_scalar(
+                "0x0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+            )]),
+            parse_pallas_scalar(
+                "0x1a6c849cc37ba32855d46a031f4a460fdb0ebb4ffad67e6466529700f9d1a49d"
+            )
+        );
+        assert_eq!(
+            poseidon_hash([parse_pallas_scalar(
+                "0x1a6c849cc37ba32855d46a031f4a460fdb0ebb4ffad67e6466529700f9d1a49d"
+            )]),
+            parse_pallas_scalar(
+                "0x0e2f050699b68c307604c2065d89e16f9ffffc5b6121a6c330fbb9fddd45abe0"
+            )
+        );
+    }
+
+    #[test]
+    fn test_poseidon_two_inputs() {
+        assert_eq!(
+            poseidon_hash([
+                parse_pallas_scalar(
+                    "0x1a6c849cc37ba32855d46a031f4a460fdb0ebb4ffad67e6466529700f9d1a49d"
+                ),
+                parse_pallas_scalar(
+                    "0x0e2f050699b68c307604c2065d89e16f9ffffc5b6121a6c330fbb9fddd45abe0"
+                )
+            ]),
+            parse_pallas_scalar(
+                "0x1577d68ba6b7aec999b345a8dda59dab4a68a7b5b491174121a8e60b7d1f69bc"
+            )
         );
     }
 

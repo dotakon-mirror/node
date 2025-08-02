@@ -6,15 +6,17 @@ use rand_core::{OsRng, TryRngCore};
 use std::sync::Arc;
 use tonic::transport::Server;
 
+mod bits;
+mod chips;
 mod clock;
 mod db;
 mod keys;
-mod mpt;
 mod net;
 mod proto;
 mod service;
 mod ssl;
 mod topology;
+mod tree;
 mod utils;
 mod version;
 
