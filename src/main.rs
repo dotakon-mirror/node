@@ -2,7 +2,7 @@ use anyhow::{Result, anyhow};
 use clap::Parser;
 use dotakon::node_service_v1_server::NodeServiceV1Server;
 use primitive_types::H256;
-use rand_core::{OsRng, TryRngCore};
+use rand_core::{OsRng, RngCore};
 use std::sync::Arc;
 use tonic::transport::Server;
 
@@ -12,6 +12,7 @@ mod clock;
 mod db;
 mod keys;
 mod net;
+mod params;
 mod proto;
 mod service;
 mod ssl;
@@ -73,7 +74,7 @@ struct Args {
 
 fn get_random() -> H256 {
     let mut bytes = [0u8; 32];
-    OsRng.try_fill_bytes(&mut bytes).unwrap();
+    OsRng.fill_bytes(&mut bytes);
     H256::from_slice(&bytes)
 }
 

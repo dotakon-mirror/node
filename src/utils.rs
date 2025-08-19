@@ -321,13 +321,13 @@ pub mod test {
     ) -> Result<()> {
         let prover_or_error = MockProver::run(k, circuit, instance);
         if let Err(error) = prover_or_error {
-            print!("{}\n", error);
+            println!("{}", error);
             return Err(anyhow!(error));
         }
         let prover = prover_or_error.unwrap();
         if let Err(errors) = prover.verify() {
             for error in errors {
-                print!("{}\n", error);
+                println!("{}", error);
             }
             return Err(anyhow!("verification failed"));
         }

@@ -10,7 +10,7 @@ use crate::version;
 use anyhow::Context;
 use pasta_curves::{pallas::Point, pallas::Scalar};
 use primitive_types::H256;
-use rand_core::{OsRng, TryRngCore};
+use rand_core::{OsRng, RngCore};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -19,7 +19,7 @@ use tonic::{Request, Response, Status, Streaming};
 
 fn get_random() -> H256 {
     let mut bytes = [0u8; 32];
-    OsRng.try_fill_bytes(&mut bytes).unwrap();
+    OsRng.fill_bytes(&mut bytes);
     H256::from_slice(&bytes)
 }
 

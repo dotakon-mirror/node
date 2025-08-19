@@ -726,8 +726,6 @@ pub type ProgramStorageProof = MerkleProof<u64>;
 
 #[cfg(test)]
 mod tests {
-    use crate::utils::testing_keys1;
-
     use super::*;
     use ff::PrimeField;
 
@@ -1504,10 +1502,13 @@ mod tests {
     #[test]
     fn test_zk_lookup() {
         let mut tree = AccountBalanceTree::default();
-        let key = test_scalar1();
-        let value = test_scalar2();
-        tree.put(key, value, 0);
-        assert!(LookupCircuit::verify(tree.get_version(0), key, Scalar::ZERO).is_err());
-        assert!(LookupCircuit::verify(tree.get_version(0), key, test_scalar2()).is_ok());
+        let key1 = test_scalar1();
+        let key2 = test_scalar2();
+        let value = test_scalar3();
+        tree.put(key1, value, 0);
+        assert!(LookupCircuit::verify(tree.get_version(0), key1, Scalar::ZERO).is_err());
+        assert!(LookupCircuit::verify(tree.get_version(0), key1, value).is_ok());
+        assert!(LookupCircuit::verify(tree.get_version(0), key2, Scalar::ZERO).is_ok());
+        assert!(LookupCircuit::verify(tree.get_version(0), key2, value).is_err());
     }
 }
