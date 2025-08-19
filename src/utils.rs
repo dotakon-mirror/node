@@ -3,7 +3,7 @@ use curve25519_dalek::{
     edwards::CompressedEdwardsY, edwards::EdwardsPoint as Point25519, scalar::Scalar as Scalar25519,
 };
 use ff::{FromUniformBytes, PrimeField};
-use halo2_poseidon::{ConstantLength, Hash as PoseidonHash, P128Pow5T3};
+use halo2_poseidon::{ConstantLength, Hash, P128Pow5T3};
 use oid_registry::{Oid, OidEntry, OidRegistry, asn1_rs::oid};
 use pasta_curves::{
     group::GroupEncoding, pallas::Point as PointPallas, pallas::Scalar as ScalarPallas,
@@ -176,9 +176,17 @@ pub fn format_wallet_address(wallet_address: ScalarPallas) -> String {
     format!("{:#x}", pallas_scalar_to_u256(wallet_address))
 }
 
+/// Hashes a sequence of scalars with Poseidon (using `P128Pow5T3`).
 pub fn poseidon_hash<const L: usize>(inputs: [ScalarPallas; L]) -> ScalarPallas {
-    let hasher = PoseidonHash::<ScalarPallas, P128Pow5T3, ConstantLength<L>, 3, 2>::init();
+    let hasher = Hash::<ScalarPallas, P128Pow5T3, ConstantLength<L>, 3, 2>::init();
     hasher.hash(inputs)
+}
+
+/// Makes a type hashable with Poseidon (using `P128Pow5T3`).
+///
+/// Implementors can use the `poseidon_hash` function above.
+pub trait PoseidonHash {
+    fn poseidon_hash(&self) -> ScalarPallas;
 }
 
 /// Schnorr signature over the Pallas curve.

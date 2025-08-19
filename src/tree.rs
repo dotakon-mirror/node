@@ -56,14 +56,10 @@ impl FromScalar for u64 {
     }
 }
 
-pub trait PoseidonHash {
-    fn poseidon_hash(&self) -> Scalar;
-}
-
 trait Node<
     K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
     V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
->: Debug + Send + Sync + PoseidonHash + AsScalar + 'static
+>: Debug + Send + Sync + AsScalar + 'static
 {
     fn get(&self, key: K) -> &V;
     fn lookup(&self, key: K) -> (&V, Vec<(Scalar, Scalar)>);
@@ -160,7 +156,6 @@ struct Leaf<
     V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
 > {
     value: V,
-    hash: Scalar,
     _key: PhantomData<K>,
 }
 
@@ -170,10 +165,8 @@ impl<
 > Leaf<K, V>
 {
     fn new(value: V) -> Self {
-        let hash = utils::poseidon_hash([value.as_scalar()]);
         Self {
             value,
-            hash,
             _key: PhantomData {},
         }
     }
@@ -200,20 +193,10 @@ impl<
 impl<
     K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
     V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
-> PoseidonHash for Leaf<K, V>
-{
-    fn poseidon_hash(&self) -> Scalar {
-        self.hash
-    }
-}
-
-impl<
-    K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
-    V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
 > AsScalar for Leaf<K, V>
 {
     fn as_scalar(&self) -> Scalar {
-        self.hash
+        self.value.as_scalar()
     }
 }
 
@@ -236,7 +219,7 @@ impl<
 > InternalNode<K, V>
 {
     fn new(level: usize, left: Arc<dyn Node<K, V>>, right: Arc<dyn Node<K, V>>) -> Self {
-        let hash = utils::poseidon_hash([left.poseidon_hash(), right.poseidon_hash()]);
+        let hash = utils::poseidon_hash([left.as_scalar(), right.as_scalar()]);
         Self {
             level,
             left,
@@ -270,7 +253,7 @@ impl<
         } else {
             self.left.lookup(key)
         };
-        path.push((self.left.poseidon_hash(), self.right.poseidon_hash()));
+        path.push((self.left.as_scalar(), self.right.as_scalar()));
         (value, path)
     }
 
@@ -281,16 +264,6 @@ impl<
             (self.left.put(key, value), self.right.clone())
         };
         Arc::new(Self::new(self.level, left, right))
-    }
-}
-
-impl<
-    K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
-    V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
-> PoseidonHash for InternalNode<K, V>
-{
-    fn poseidon_hash(&self) -> Scalar {
-        self.hash
     }
 }
 
@@ -338,7 +311,7 @@ impl<K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static> Merkle
             ));
         }
         let mut key = self.key.into();
-        let mut hash = utils::poseidon_hash([self.value_as_scalar]);
+        let mut hash = self.value_as_scalar;
         for (left, right) in self.path {
             let bit = bits::and1(key);
             let not = Scalar::from(1) - bit;
@@ -510,10 +483,10 @@ impl LookupChip {
     pub fn assign<K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static>(
         &self,
         layouter: &mut impl circuit::Layouter<Scalar>,
-        root_hash: circuit::AssignedCell<Scalar, Scalar>,
-        key: circuit::AssignedCell<Scalar, Scalar>,
+        root_hash: chips::AssignedCell,
+        key: chips::AssignedCell,
         merkle_proof: &MerkleProof<K>,
-    ) -> Result<circuit::AssignedCell<Scalar, Scalar>, plonk::Error> {
+    ) -> Result<chips::AssignedCell, plonk::Error> {
         let bit_decomposer =
             chips::FullBitDecomposerChip::construct(self.config.full_bit_decomposer.clone());
         let key_bits = bit_decomposer.assign(layouter, key)?;
@@ -528,10 +501,8 @@ impl LookupChip {
                 )
             },
         )?;
-        let poseidon = chips::PoseidonChip::<1>::construct(self.config.poseidon.clone());
-        let mut hash =
-            poseidon.assign(&mut layouter.namespace(|| "hash_value"), [value.clone()])?;
         let poseidon = chips::PoseidonChip::<2>::construct(self.config.poseidon.clone());
+        let mut hash = value.clone();
         let path = merkle_proof.path();
         for i in 0..256 {
             let (left, right) = layouter.assign_region(
@@ -608,7 +579,7 @@ impl<
 > MerkleTreeVersion<K, V>
 {
     pub fn root_hash(&self) -> Scalar {
-        self.root.poseidon_hash()
+        self.root.as_scalar()
     }
 
     pub fn get(&self, key: K) -> &V {
@@ -621,7 +592,7 @@ impl<
             key,
             value_as_scalar: value.as_scalar(),
             path: path.try_into().unwrap(),
-            root_hash: self.root.poseidon_hash(),
+            root_hash: self.root.as_scalar(),
         }
     }
 
@@ -650,16 +621,6 @@ impl<
 > AsScalar for MerkleTreeVersion<K, V>
 {
     fn as_scalar(&self) -> Scalar {
-        self.root_hash()
-    }
-}
-
-impl<
-    K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
-    V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
-> PoseidonHash for MerkleTreeVersion<K, V>
-{
-    fn poseidon_hash(&self) -> Scalar {
         self.root_hash()
     }
 }
@@ -700,7 +661,7 @@ impl<
     pub fn put(&mut self, key: K, value: V, version: u64) {
         let (_, root) = self.versions.range_mut(0..=version).next_back().unwrap();
         let new_root = root.put(key, value);
-        if new_root.poseidon_hash() != root.poseidon_hash() {
+        if new_root.as_scalar() != root.as_scalar() {
             self.versions.insert(version, new_root);
         }
     }
@@ -757,7 +718,7 @@ mod tests {
     fn test_initial_root_hash() {
         let tree = AccountBalanceTree::default();
         let hash = utils::parse_pallas_scalar(
-            "0x3eff13934bf9e1844f467dc1fe60c686da504238cfaee6c4e63ada8891727491",
+            "0x3246b50f4df2b94373bfc5f31f01d504e2dd6c839506d70a9cd02a3a6805d01a",
         );
         assert_eq!(tree.root_hash(0), hash);
         assert_eq!(tree.root_hash(1), hash);
@@ -1427,11 +1388,11 @@ mod tests {
             cs.enable_equality(key);
             let value = cs.instance_column();
             cs.enable_equality(value);
-            let binary_digits = cs.fixed_column();
             let key_to_decompose = cs.advice_column();
-            let bits = std::array::from_fn(|_| cs.advice_column());
+            let range = cs.fixed_column();
+            let cmp = cs.advice_column();
             let full_bit_decomposer =
-                chips::FullBitDecomposerChip::configure(cs, binary_digits, key_to_decompose, bits);
+                chips::FullBitDecomposerChip::configure(cs, key_to_decompose, range, cmp);
             let poseidon = chips::configure_poseidon(cs);
             let chip = LookupChip::configure(cs, full_bit_decomposer, poseidon);
             LookupCircuitConfig {

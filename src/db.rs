@@ -5,6 +5,7 @@ use crate::proto;
 use crate::topology;
 use crate::tree;
 use crate::utils;
+use crate::utils::PoseidonHash;
 use anyhow::{Context, Result, anyhow};
 use ff::Field;
 use pasta_curves::pallas::Scalar;
@@ -309,7 +310,7 @@ impl Transaction {
     }
 }
 
-impl tree::PoseidonHash for Transaction {
+impl PoseidonHash for Transaction {
     fn poseidon_hash(&self) -> Scalar {
         self.hash
     }
@@ -470,7 +471,6 @@ mod tests {
     use super::*;
     use crate::clock::test::MockClock;
     use crate::keys;
-    use crate::tree::PoseidonHash;
     use crate::utils;
     use crate::version;
     use ff::PrimeField;
@@ -523,7 +523,7 @@ mod tests {
 
     fn genesis_block_hash() -> Scalar {
         utils::u256_to_pallas_scalar(
-            "0x29f44c06810e85bef05ced93d17dce8f1786c073972c0591e09f63c9d916380d"
+            "0x1997012f8a7fd8e4c3db28b5f5679f86af9c4754acc0810d5b5de4a854396a79"
                 .parse()
                 .unwrap(),
         )
@@ -607,13 +607,13 @@ mod tests {
         assert_eq!(
             block.account_balances_root_hash(),
             utils::parse_pallas_scalar(
-                "0x3eff13934bf9e1844f467dc1fe60c686da504238cfaee6c4e63ada8891727491"
+                "0x3246b50f4df2b94373bfc5f31f01d504e2dd6c839506d70a9cd02a3a6805d01a"
             )
         );
         assert_eq!(
             block.program_storage_root_hash(),
             utils::parse_pallas_scalar(
-                "0x1a8ee4b1540cb3b9e99bf844f0b4dc321aa0a57bdfea7850b3632446e56d00fe"
+                "0x0c43ae48cdea4fd4d77e811f272ea8303ffbd567fa75d0caac1a86e1dc9dd5db"
             )
         );
         assert_eq!(BlockInfo::decode(&block.encode()).unwrap(), block);

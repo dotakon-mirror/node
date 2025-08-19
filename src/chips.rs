@@ -1,11 +1,12 @@
 use crate::bits;
 use crate::utils;
-use ff::Field;
 use halo2_gadgets::poseidon;
 use halo2_poseidon::{ConstantLength, P128Pow5T3};
 use halo2_proofs::{circuit, plonk, poly};
 use pasta_curves::pallas::Scalar;
 use primitive_types::U256;
+
+pub type AssignedCell = circuit::AssignedCell<Scalar, Scalar>;
 
 pub type PoseidonConfig = poseidon::Pow5Config<Scalar, 3, 2>;
 
@@ -44,8 +45,8 @@ impl<const L: usize> PoseidonChip<L> {
     pub fn assign(
         &self,
         layouter: &mut impl circuit::Layouter<Scalar>,
-        inputs: [circuit::AssignedCell<Scalar, Scalar>; L],
-    ) -> Result<circuit::AssignedCell<Scalar, Scalar>, plonk::Error> {
+        inputs: [AssignedCell; L],
+    ) -> Result<AssignedCell, plonk::Error> {
         let poseidon = poseidon::Pow5Chip::construct(self.config.clone());
         let hasher = poseidon::Hash::<Scalar, _, P128Pow5T3, ConstantLength<L>, 3, 2>::init(
             poseidon,
@@ -61,12 +62,14 @@ impl<const L: usize> PoseidonChip<L> {
 #[derive(Debug, Clone)]
 pub struct BitDecomposerConfig<const N: usize> {
     value: plonk::Column<plonk::Advice>,
-    bits: [plonk::Column<plonk::Advice>; N],
-    selector: plonk::Selector,
+    bit_selector: plonk::Selector,
+    sum_selector: plonk::Selector,
 }
 
 /// Decomposes a scalar into `N` bits in little-endian order (bit #0 is the LBS, bit #N-1 is the
 /// MSB).
+///
+/// This chip requires N > 0 and will panic if that's not the case.
 ///
 /// WARNING: this chip doesn't check that the resulting decomposition is less than the field order,
 /// so it's unsafe if you're trying to decompose 255 or more bits. Decomposing to 254 or less bits
@@ -84,33 +87,32 @@ impl<const N: usize> BitDecomposerChip<N> {
     pub fn configure(
         cs: &mut plonk::ConstraintSystem<Scalar>,
         value: plonk::Column<plonk::Advice>,
-        bits: [plonk::Column<plonk::Advice>; N],
     ) -> BitDecomposerConfig<N> {
+        assert!(N > 0);
         cs.enable_equality(value);
-        let selector = cs.selector();
-        cs.create_gate("bits", |cells| {
-            let selector = cells.query_selector(selector);
-            let mut constraints = vec![];
-            for i in 0..N {
-                let bit1 = cells.query_advice(bits[i], poly::Rotation::cur());
-                let bit2 = bit1.clone();
-                constraints
-                    .push(selector.clone() * bit1 * (plonk::Expression::Constant(1.into()) - bit2));
-            }
-            let mut total = cells.query_advice(value, poly::Rotation::cur());
+        let bit_selector = cs.selector();
+        cs.create_gate("bit", |cells| {
+            let selector = cells.query_selector(bit_selector);
+            let bit1 = cells.query_advice(value, poly::Rotation::cur());
+            let bit2 = bit1.clone();
+            vec![selector.clone() * bit1 * (plonk::Expression::Constant(1.into()) - bit2)]
+        });
+        let sum_selector = cs.selector();
+        cs.create_gate("sum", |cells| {
+            let selector = cells.query_selector(sum_selector);
+            let mut total = cells.query_advice(value, poly::Rotation(0));
             let mut power = 1.into();
-            for i in 0..N {
-                let bit = cells.query_advice(bits[i], poly::Rotation::cur());
+            for i in 1..=N {
+                let bit = cells.query_advice(value, poly::Rotation(i as i32));
                 total = total - plonk::Expression::Constant(power) * bit;
                 power += power;
             }
-            constraints.push(selector * total);
-            constraints
+            vec![selector * total]
         });
         BitDecomposerConfig {
             value,
-            bits,
-            selector,
+            bit_selector,
+            sum_selector,
         }
     }
 
@@ -121,26 +123,28 @@ impl<const N: usize> BitDecomposerChip<N> {
     pub fn assign(
         &self,
         layouter: &mut impl circuit::Layouter<Scalar>,
-        value: circuit::AssignedCell<Scalar, Scalar>,
-    ) -> Result<[circuit::AssignedCell<Scalar, Scalar>; N], plonk::Error> {
+        input: AssignedCell,
+    ) -> Result<[AssignedCell; N], plonk::Error> {
+        assert!(N > 0);
         Ok(layouter
             .assign_region(
                 || "decompose",
                 |mut region| {
-                    self.config.selector.enable(&mut region, 0)?;
-                    let assigned_value = region.assign_advice(
+                    self.config.sum_selector.enable(&mut region, 0)?;
+                    let value = region.assign_advice(
                         || "load_value",
                         self.config.value,
                         0,
-                        || value.value().cloned(),
+                        || input.value().cloned(),
                     )?;
-                    region.constrain_equal(value.cell(), assigned_value.cell())?;
+                    region.constrain_equal(value.cell(), input.cell())?;
                     let mut value = value.value().cloned();
                     Ok((0..N)
                         .map(|i| {
+                            self.config.bit_selector.enable(&mut region, i + 1)?;
                             let bit = value.map(bits::and1);
                             value = value.map(bits::shr1);
-                            region.assign_advice(|| "extract_bit", self.config.bits[i], 0, || bit)
+                            region.assign_advice(|| "extract_bit", self.config.value, i + 1, || bit)
                         })
                         .collect::<Result<Vec<_>, _>>()?)
                 },
@@ -165,8 +169,11 @@ impl<const N: usize> circuit::Chip<Scalar> for BitDecomposerChip<N> {
 
 #[derive(Debug, Clone)]
 pub struct BitComparatorConfig<const N: usize> {
-    bits: [plonk::Column<plonk::Advice>; N],
-    selector: plonk::Selector,
+    left: plonk::Column<plonk::Advice>,
+    right: plonk::Column<plonk::Advice>,
+    cmp: plonk::Column<plonk::Advice>,
+    half_selector: plonk::Selector,
+    full_selector: plonk::Selector,
 }
 
 /// Compares two scalars X and Y that have been decomposed into `N` bits each (in little-endian
@@ -193,40 +200,42 @@ pub struct BitComparatorChip<const N: usize> {
 impl<const N: usize> BitComparatorChip<N> {
     pub fn configure(
         cs: &mut plonk::ConstraintSystem<Scalar>,
-        bits: [plonk::Column<plonk::Advice>; N],
+        left: plonk::Column<plonk::Advice>,
+        right: plonk::Column<plonk::Advice>,
+        cmp: plonk::Column<plonk::Advice>,
     ) -> BitComparatorConfig<N> {
         assert!(N > 0);
-        for i in 0..N {
-            cs.enable_equality(bits[i]);
-        }
-        let selector = cs.selector();
-        cs.create_gate("cmp0", |cells| {
-            let selector = cells.query_selector(selector);
-            let left = cells.query_advice(bits[N - 1], poly::Rotation(0));
-            let right = cells.query_advice(bits[N - 1], poly::Rotation(1));
-            let cmp = cells.query_advice(bits[N - 1], poly::Rotation(2));
+        cs.enable_equality(left);
+        cs.enable_equality(right);
+        let half_selector = cs.selector();
+        cs.create_gate("half_cmp", |cells| {
+            let selector = cells.query_selector(half_selector);
+            let left = cells.query_advice(left, poly::Rotation::cur());
+            let right = cells.query_advice(right, poly::Rotation::cur());
+            let cmp = cells.query_advice(cmp, poly::Rotation::cur());
             vec![selector * (cmp - left + right)]
         });
-        if N > 1 {
-            cs.create_gate("cmp", |cells| {
-                let selector = cells.query_selector(selector);
-                (0..(N - 1))
-                    .rev()
-                    .map(|i| {
-                        let left = cells.query_advice(bits[i], poly::Rotation(0));
-                        let right = cells.query_advice(bits[i], poly::Rotation(1));
-                        let prev = cells.query_advice(bits[i + 1], poly::Rotation(2));
-                        let curr = cells.query_advice(bits[i], poly::Rotation(2));
-                        selector.clone()
-                            * (curr
-                                - prev.clone()
-                                - (plonk::Expression::Constant(1.into()) - prev.square())
-                                    * (left - right))
-                    })
-                    .collect::<Vec<_>>()
-            });
+        let full_selector = cs.selector();
+        cs.create_gate("full_cmp", |cells| {
+            let selector = cells.query_selector(full_selector);
+            let left = cells.query_advice(left, poly::Rotation::cur());
+            let right = cells.query_advice(right, poly::Rotation::cur());
+            let prev = cells.query_advice(cmp, poly::Rotation::next());
+            let curr = cells.query_advice(cmp, poly::Rotation::cur());
+            vec![
+                selector
+                    * (curr
+                        - prev.clone()
+                        - (plonk::Expression::Constant(1.into()) - prev.square()) * (left - right)),
+            ]
+        });
+        BitComparatorConfig {
+            left,
+            right,
+            cmp,
+            half_selector,
+            full_selector,
         }
-        BitComparatorConfig { bits, selector }
     }
 
     pub fn construct(config: BitComparatorConfig<N>) -> Self {
@@ -236,54 +245,55 @@ impl<const N: usize> BitComparatorChip<N> {
     pub fn assign(
         &self,
         layouter: &mut impl circuit::Layouter<Scalar>,
-        left: &[circuit::AssignedCell<Scalar, Scalar>],
-        right: &[circuit::AssignedCell<Scalar, Scalar>],
-    ) -> Result<circuit::AssignedCell<Scalar, Scalar>, plonk::Error> {
+        left: &[AssignedCell],
+        right: &[AssignedCell],
+    ) -> Result<AssignedCell, plonk::Error> {
         assert!(N > 0);
         layouter.assign_region(
             || "cmp",
             |mut region| {
-                self.config.selector.enable(&mut region, 0)?;
+                self.config.half_selector.enable(&mut region, N - 1)?;
                 let assigned_left = region.assign_advice(
                     || format!("load_left({})", N - 1),
-                    self.config.bits[N - 1],
-                    0,
+                    self.config.left,
+                    N - 1,
                     || left[N - 1].value().cloned(),
                 )?;
                 region.constrain_equal(assigned_left.cell(), left[N - 1].cell())?;
                 let assigned_right = region.assign_advice(
                     || format!("load_right({})", N - 1),
-                    self.config.bits[N - 1],
-                    1,
+                    self.config.right,
+                    N - 1,
                     || right[N - 1].value().cloned(),
                 )?;
                 region.constrain_equal(assigned_right.cell(), right[N - 1].cell())?;
                 let mut out = region.assign_advice(
                     || format!("cmp({})", N - 1),
-                    self.config.bits[N - 1],
-                    2,
+                    self.config.cmp,
+                    N - 1,
                     || assigned_left.value() - assigned_right.value(),
                 )?;
                 for i in (0..(N - 1)).rev() {
+                    self.config.full_selector.enable(&mut region, i)?;
                     let assigned_left = region.assign_advice(
                         || format!("load_left({})", i),
-                        self.config.bits[i],
-                        0,
+                        self.config.left,
+                        i,
                         || left[i].value().cloned(),
                     )?;
                     region.constrain_equal(assigned_left.cell(), left[i].cell())?;
                     let assigned_right = region.assign_advice(
                         || format!("load_right({})", i),
-                        self.config.bits[i],
-                        1,
+                        self.config.right,
+                        i,
                         || right[i].value().cloned(),
                     )?;
                     region.constrain_equal(assigned_right.cell(), right[i].cell())?;
                     let square = out.value().map(|out| out.square());
                     out = region.assign_advice(
                         || format!("cmp({})", i),
-                        self.config.bits[i],
-                        2,
+                        self.config.cmp,
+                        i,
                         || {
                             out.value()
                                 + (circuit::Value::known(Scalar::from(1)) - square)
@@ -312,15 +322,19 @@ impl<const N: usize> circuit::Chip<Scalar> for BitComparatorChip<N> {
 
 #[derive(Debug, Clone)]
 pub struct ConstBitComparatorConfig<const N: usize> {
-    binary_digits: plonk::Column<plonk::Fixed>,
-    bits: [plonk::Column<plonk::Advice>; N],
-    selector: plonk::Selector,
+    value: plonk::Column<plonk::Advice>,
+    constant: plonk::Column<plonk::Fixed>,
+    cmp: plonk::Column<plonk::Advice>,
+    half_selector: plonk::Selector,
+    full_selector: plonk::Selector,
 }
 
 /// A bitwise comparator chip that's optimized for comparisons against a constant value.
 ///
 /// Compared with a regular `BitComparatorChip`, using a `ConstBitComparatorChip` results in `N`
 /// less constraints.
+///
+/// This chip requires N > 0 and will panic if that's not the case.
 ///
 /// NOTE: this chip panics if the decomposition of the provided constant value is larger than `N`
 /// bits.
@@ -332,45 +346,40 @@ pub struct ConstBitComparatorChip<const N: usize> {
 impl<const N: usize> ConstBitComparatorChip<N> {
     pub fn configure(
         cs: &mut plonk::ConstraintSystem<Scalar>,
-        binary_digits: plonk::Column<plonk::Fixed>,
-        bits: [plonk::Column<plonk::Advice>; N],
+        value: plonk::Column<plonk::Advice>,
+        constant: plonk::Column<plonk::Fixed>,
+        cmp: plonk::Column<plonk::Advice>,
     ) -> ConstBitComparatorConfig<N> {
         assert!(N > 0);
-        cs.enable_constant(binary_digits);
-        for i in 0..N {
-            cs.enable_equality(bits[i]);
-        }
-        let selector = cs.selector();
-        cs.create_gate("cmp0", |cells| {
-            let selector = cells.query_selector(selector);
-            let left = cells.query_advice(bits[N - 1], poly::Rotation(0));
-            let right = cells.query_advice(bits[N - 1], poly::Rotation(1));
-            let cmp = cells.query_advice(bits[N - 1], poly::Rotation(2));
+        cs.enable_equality(value);
+        let half_selector = cs.selector();
+        cs.create_gate("half_cmp", |cells| {
+            let selector = cells.query_selector(half_selector);
+            let left = cells.query_advice(value, poly::Rotation::cur());
+            let right = cells.query_fixed(constant);
+            let cmp = cells.query_advice(cmp, poly::Rotation::cur());
             vec![selector * (cmp - left + right)]
         });
-        if N > 1 {
-            cs.create_gate("cmp", |cells| {
-                let selector = cells.query_selector(selector);
-                (0..(N - 1))
-                    .rev()
-                    .map(|i| {
-                        let left = cells.query_advice(bits[i], poly::Rotation(0));
-                        let right = cells.query_advice(bits[i], poly::Rotation(1));
-                        let prev = cells.query_advice(bits[i + 1], poly::Rotation(2));
-                        let curr = cells.query_advice(bits[i], poly::Rotation(2));
-                        selector.clone()
-                            * (curr
-                                - prev.clone()
-                                - (plonk::Expression::Constant(1.into()) - prev.square())
-                                    * (left - right))
-                    })
-                    .collect::<Vec<_>>()
-            });
-        }
+        let full_selector = cs.selector();
+        cs.create_gate("full_cmp", |cells| {
+            let selector = cells.query_selector(full_selector);
+            let left = cells.query_advice(value, poly::Rotation::cur());
+            let right = cells.query_fixed(constant);
+            let prev = cells.query_advice(cmp, poly::Rotation::next());
+            let curr = cells.query_advice(cmp, poly::Rotation::cur());
+            vec![
+                selector
+                    * (curr
+                        - prev.clone()
+                        - (plonk::Expression::Constant(1.into()) - prev.square()) * (left - right)),
+            ]
+        });
         ConstBitComparatorConfig {
-            binary_digits,
-            bits,
-            selector,
+            value,
+            constant,
+            cmp,
+            half_selector,
+            full_selector,
         }
     }
 
@@ -381,75 +390,54 @@ impl<const N: usize> ConstBitComparatorChip<N> {
     pub fn assign(
         &self,
         layouter: &mut impl circuit::Layouter<Scalar>,
-        input: &[circuit::AssignedCell<Scalar, Scalar>],
+        input: &[AssignedCell],
         constant: U256,
-    ) -> Result<circuit::AssignedCell<Scalar, Scalar>, plonk::Error> {
+    ) -> Result<AssignedCell, plonk::Error> {
         assert!(N > 0);
         let const_bits = bits::decompose_bits::<N>(constant);
         layouter.assign_region(
             || "cmp",
             |mut region| {
-                self.config.selector.enable(&mut region, 0)?;
-                let zero = region.assign_fixed(
-                    || "init_zero",
-                    self.config.binary_digits,
-                    0,
-                    || circuit::Value::known(Scalar::ZERO),
-                )?;
-                let one = region.assign_fixed(
-                    || "init_one",
-                    self.config.binary_digits,
-                    1,
-                    || circuit::Value::known(Scalar::from(1)),
-                )?;
+                self.config.half_selector.enable(&mut region, N - 1)?;
                 let assigned_left = region.assign_advice(
                     || format!("load_input({})", N - 1),
-                    self.config.bits[N - 1],
-                    0,
+                    self.config.value,
+                    N - 1,
                     || input[N - 1].value().cloned(),
                 )?;
                 region.constrain_equal(assigned_left.cell(), input[N - 1].cell())?;
-                let assigned_right = region.assign_advice(
+                let assigned_right = region.assign_fixed(
                     || format!("load_const({})", N - 1),
-                    self.config.bits[N - 1],
-                    1,
+                    self.config.constant,
+                    N - 1,
                     || circuit::Value::known(const_bits[N - 1]),
                 )?;
-                if const_bits[N - 1] != Scalar::ZERO {
-                    region.constrain_equal(assigned_right.cell(), one.cell())?;
-                } else {
-                    region.constrain_equal(assigned_right.cell(), zero.cell())?;
-                }
                 let mut out = region.assign_advice(
                     || format!("cmp({})", N - 1),
-                    self.config.bits[N - 1],
-                    2,
+                    self.config.cmp,
+                    N - 1,
                     || assigned_left.value() - assigned_right.value(),
                 )?;
                 for i in (0..(N - 1)).rev() {
+                    self.config.full_selector.enable(&mut region, i)?;
                     let assigned_left = region.assign_advice(
                         || format!("load_input({})", i),
-                        self.config.bits[i],
-                        0,
+                        self.config.value,
+                        i,
                         || input[i].value().cloned(),
                     )?;
                     region.constrain_equal(assigned_left.cell(), input[i].cell())?;
-                    let assigned_right = region.assign_advice(
+                    let assigned_right = region.assign_fixed(
                         || format!("load_const({})", i),
-                        self.config.bits[i],
-                        1,
+                        self.config.constant,
+                        i,
                         || circuit::Value::known(const_bits[i]),
                     )?;
-                    if const_bits[i] != Scalar::ZERO {
-                        region.constrain_equal(assigned_right.cell(), one.cell())?;
-                    } else {
-                        region.constrain_equal(assigned_right.cell(), zero.cell())?;
-                    }
                     let square = out.value().map(|out| out.square());
                     out = region.assign_advice(
                         || format!("cmp({})", i),
-                        self.config.bits[i],
-                        2,
+                        self.config.cmp,
+                        i,
                         || {
                             out.value()
                                 + (circuit::Value::known(Scalar::from(1)) - square)
@@ -476,17 +464,20 @@ impl<const N: usize> circuit::Chip<Scalar> for ConstBitComparatorChip<N> {
     }
 }
 
-/// Decomposes a scalar value into its 256-bit representation. This is done securely in two steps:
+/// Decomposes a scalar value into its 256-bit representation.
 ///
-///   1. the value is decomposed normally using `BitDecomposerChip<256>`;
-///   2. the resulting bit decomposition is checked against the bit decomposition of `p`, the order
-///      of the scalar field.
-///
-/// Step #2 ensures correctness by checking that the decomposed value is strictly less than `p`.
+/// To do this securely, the chip not only decomposes the 256 bits, it also performs a bitwise
+/// comparison with q (the field order). This prevents aliasing, e.g. it guarantees that 4 gets
+/// decomposed into the bit representation of 4 rather than q+4.
 #[derive(Debug, Clone)]
 pub struct FullBitDecomposerConfig {
-    decomposer: BitDecomposerConfig<256>,
-    comparator: ConstBitComparatorConfig<256>,
+    value: plonk::Column<plonk::Advice>,
+    range: plonk::Column<plonk::Fixed>,
+    cmp: plonk::Column<plonk::Advice>,
+    bit_selector: plonk::Selector,
+    sum_selector: plonk::Selector,
+    half_cmp_selector: plonk::Selector,
+    full_cmp_selector: plonk::Selector,
     range_check_selector: plonk::Selector,
 }
 
@@ -498,22 +489,66 @@ pub struct FullBitDecomposerChip {
 impl FullBitDecomposerChip {
     pub fn configure(
         cs: &mut plonk::ConstraintSystem<Scalar>,
-        binary_digits: plonk::Column<plonk::Fixed>,
         value: plonk::Column<plonk::Advice>,
-        bits: [plonk::Column<plonk::Advice>; 256],
+        range: plonk::Column<plonk::Fixed>,
+        cmp: plonk::Column<plonk::Advice>,
     ) -> FullBitDecomposerConfig {
-        for i in 0..256 {
-            cs.enable_equality(bits[i]);
-        }
+        cs.enable_equality(value);
+        let bit_selector = cs.selector();
+        cs.create_gate("bit", |cells| {
+            let selector = cells.query_selector(bit_selector);
+            let bit1 = cells.query_advice(value, poly::Rotation::cur());
+            let bit2 = bit1.clone();
+            vec![selector.clone() * bit1 * (plonk::Expression::Constant(1.into()) - bit2)]
+        });
+        let sum_selector = cs.selector();
+        cs.create_gate("sum", |cells| {
+            let selector = cells.query_selector(sum_selector);
+            let mut total = cells.query_advice(value, poly::Rotation(0));
+            let mut power = 1.into();
+            for i in 1..=256 {
+                let bit = cells.query_advice(value, poly::Rotation(i as i32));
+                total = total - plonk::Expression::Constant(power) * bit;
+                power += power;
+            }
+            vec![selector * total]
+        });
+        let half_cmp_selector = cs.selector();
+        cs.create_gate("half_cmp", |cells| {
+            let selector = cells.query_selector(half_cmp_selector);
+            let left = cells.query_advice(value, poly::Rotation::cur());
+            let right = cells.query_fixed(range);
+            let cmp = cells.query_advice(cmp, poly::Rotation::cur());
+            vec![selector * (cmp - left + right)]
+        });
+        let full_cmp_selector = cs.selector();
+        cs.create_gate("full_cmp", |cells| {
+            let selector = cells.query_selector(full_cmp_selector);
+            let left = cells.query_advice(value, poly::Rotation::cur());
+            let right = cells.query_fixed(range);
+            let prev = cells.query_advice(cmp, poly::Rotation::next());
+            let curr = cells.query_advice(cmp, poly::Rotation::cur());
+            vec![
+                selector
+                    * (curr
+                        - prev.clone()
+                        - (plonk::Expression::Constant(1.into()) - prev.square()) * (left - right)),
+            ]
+        });
         let range_check_selector = cs.selector();
         cs.create_gate("check_range", |cells| {
             let selector = cells.query_selector(range_check_selector);
-            let cmp = cells.query_advice(bits[0], poly::Rotation::cur());
-            vec![selector * cmp.clone() * (cmp + plonk::Expression::Constant(1.into()))]
+            let cmp = cells.query_advice(cmp, poly::Rotation::cur());
+            vec![selector * (cmp + plonk::Expression::Constant(1.into()))]
         });
         FullBitDecomposerConfig {
-            decomposer: BitDecomposerChip::configure(cs, value, bits),
-            comparator: ConstBitComparatorChip::configure(cs, binary_digits, bits),
+            value,
+            range,
+            cmp,
+            bit_selector,
+            sum_selector,
+            half_cmp_selector,
+            full_cmp_selector,
             range_check_selector,
         }
     }
@@ -525,31 +560,67 @@ impl FullBitDecomposerChip {
     pub fn assign(
         &self,
         layouter: &mut impl circuit::Layouter<Scalar>,
-        value: circuit::AssignedCell<Scalar, Scalar>,
-    ) -> Result<[circuit::AssignedCell<Scalar, Scalar>; 256], plonk::Error> {
-        let decomposer = BitDecomposerChip::<256>::construct(self.config.decomposer.clone());
-        let bits = decomposer.assign(&mut layouter.namespace(|| "decompose"), value)?;
-        let comparator = ConstBitComparatorChip::<256>::construct(self.config.comparator.clone());
-        let cmp = comparator.assign(
-            &mut layouter.namespace(|| "check_range"),
-            &bits,
-            utils::pallas_scalar_modulus(),
-        )?;
-        layouter.assign_region(
-            || "check_range",
-            |mut region| {
-                self.config.range_check_selector.enable(&mut region, 0)?;
-                let assigned = region.assign_advice(
-                    || "load_cmp",
-                    self.config.comparator.bits[0],
-                    0,
-                    || cmp.value().cloned(),
-                )?;
-                region.constrain_equal(cmp.cell(), assigned.cell())?;
-                Ok(())
-            },
-        )?;
-        Ok(bits)
+        input: AssignedCell,
+    ) -> Result<[AssignedCell; 256], plonk::Error> {
+        let range_bits = bits::decompose_bits::<256>(utils::pallas_scalar_modulus());
+        Ok(layouter
+            .assign_region(
+                || "decompose",
+                |mut region| {
+                    self.config.sum_selector.enable(&mut region, 0)?;
+                    self.config.range_check_selector.enable(&mut region, 1)?;
+                    let value = region.assign_advice(
+                        || "load_value",
+                        self.config.value,
+                        0,
+                        || input.value().cloned(),
+                    )?;
+                    region.constrain_equal(value.cell(), input.cell())?;
+                    let mut value = value.value().cloned();
+                    let bits = (0..256)
+                        .map(|i| {
+                            self.config.bit_selector.enable(&mut region, i + 1)?;
+                            let bit = value.map(bits::and1);
+                            value = value.map(bits::shr1);
+                            region.assign_advice(|| "extract_bit", self.config.value, i + 1, || bit)
+                        })
+                        .collect::<Result<Vec<_>, plonk::Error>>()?;
+                    let range_bits = (0..256)
+                        .map(|i| {
+                            region.assign_fixed(
+                                || "init_range_bit",
+                                self.config.range,
+                                i + 1,
+                                || circuit::Value::known(range_bits[i]),
+                            )
+                        })
+                        .collect::<Result<Vec<_>, plonk::Error>>()?;
+                    self.config.half_cmp_selector.enable(&mut region, 256)?;
+                    let mut cmp = region.assign_advice(
+                        || "cmp",
+                        self.config.cmp,
+                        256,
+                        || bits[255].value() - range_bits[255].value(),
+                    )?;
+                    for i in (0..255).rev() {
+                        self.config.full_cmp_selector.enable(&mut region, i + 1)?;
+                        let square = cmp.value().map(|cmp| cmp.square());
+                        cmp = region.assign_advice(
+                            || "cmp",
+                            self.config.cmp,
+                            i + 1,
+                            || {
+                                cmp.value()
+                                    + (circuit::Value::known(Scalar::from(1)) - square)
+                                        * (bits[i].value() - range_bits[i].value())
+                            },
+                        )?;
+                    }
+                    Ok(bits)
+                },
+            )?
+            .try_into()
+            .unwrap())
     }
 }
 
@@ -570,6 +641,7 @@ impl circuit::Chip<Scalar> for FullBitDecomposerChip {
 mod tests {
     use super::*;
     use anyhow::Result;
+    use ff::Field;
 
     #[derive(Debug, Clone)]
     struct PoseidonCircuitConfig<const L: usize> {
@@ -743,7 +815,7 @@ mod tests {
     #[derive(Debug, Clone)]
     struct BitDecomposerCircuitConfig<const N: usize> {
         value: plonk::Column<plonk::Instance>,
-        bits: [plonk::Column<plonk::Instance>; N],
+        bits: plonk::Column<plonk::Instance>,
         chip: BitDecomposerConfig<N>,
     }
 
@@ -752,13 +824,7 @@ mod tests {
 
     impl<const N: usize> BitDecomposerCircuit<N> {
         fn verify(&self, value: Scalar, bits: [Scalar; N]) -> Result<()> {
-            utils::test::verify_circuit(
-                3,
-                self,
-                std::iter::once(vec![value])
-                    .chain(bits.map(|bit| vec![bit]))
-                    .collect(),
-            )
+            utils::test::verify_circuit(10, self, vec![vec![value], bits.to_vec()])
         }
     }
 
@@ -772,19 +838,15 @@ mod tests {
 
         fn configure(cs: &mut plonk::ConstraintSystem<Scalar>) -> Self::Config {
             let value_instance = cs.instance_column();
-            let bit_instances = std::array::from_fn(|_| cs.instance_column());
+            let bits_instance = cs.instance_column();
             let value = cs.advice_column();
-            let bits = std::array::from_fn(|_| cs.advice_column());
             cs.enable_equality(value_instance);
+            cs.enable_equality(bits_instance);
             cs.enable_equality(value);
-            for i in 0..N {
-                cs.enable_equality(bit_instances[i]);
-                cs.enable_equality(bits[i]);
-            }
             BitDecomposerCircuitConfig {
                 value: value_instance,
-                bits: bit_instances,
-                chip: BitDecomposerChip::configure(cs, value, bits),
+                bits: bits_instance,
+                chip: BitDecomposerChip::configure(cs, value),
             }
         }
 
@@ -796,14 +858,13 @@ mod tests {
             let value = layouter.assign_region(
                 || "load",
                 |mut region| {
-                    let value = region.assign_advice_from_instance(
+                    region.assign_advice_from_instance(
                         || "load_value",
                         config.value,
                         0,
                         config.chip.value,
                         0,
-                    )?;
-                    Ok(value)
+                    )
                 },
             )?;
             let chip = BitDecomposerChip::<N>::construct(config.chip.clone());
@@ -815,10 +876,10 @@ mod tests {
                         .map(|i| {
                             region.assign_advice_from_instance(
                                 || "load_bits",
-                                config.bits[i],
-                                0,
-                                config.chip.bits[i],
-                                0,
+                                config.bits,
+                                i,
+                                config.chip.value,
+                                i,
                             )
                         })
                         .collect::<Result<Vec<_>, _>>()?;
@@ -830,14 +891,6 @@ mod tests {
             )?;
             Ok(())
         }
-    }
-
-    #[test]
-    fn test_zero_bits() {
-        let circuit = BitDecomposerCircuit::<0>::default();
-        assert!(circuit.verify(0.into(), []).is_ok());
-        assert!(circuit.verify(1.into(), []).is_err());
-        assert!(circuit.verify(2.into(), []).is_err());
     }
 
     #[test]
@@ -958,10 +1011,10 @@ mod tests {
 
     #[derive(Debug, Clone)]
     struct BitComparatorCircuitConfig<const N: usize> {
-        left: [plonk::Column<plonk::Instance>; N],
-        right: [plonk::Column<plonk::Instance>; N],
-        out: plonk::Column<plonk::Instance>,
-        expected: plonk::Column<plonk::Advice>,
+        left: plonk::Column<plonk::Instance>,
+        right: plonk::Column<plonk::Instance>,
+        expected: plonk::Column<plonk::Instance>,
+        cmp: plonk::Column<plonk::Advice>,
         chip: BitComparatorConfig<N>,
     }
 
@@ -971,18 +1024,13 @@ mod tests {
     impl<const N: usize> BitComparatorCircuit<N> {
         fn verify(&self, left: Scalar, right: Scalar, out: Scalar) -> Result<()> {
             utils::test::verify_circuit(
-                4,
+                10,
                 self,
-                bits::decompose_scalar::<N>(left)
-                    .iter()
-                    .map(|bit| vec![*bit])
-                    .chain(
-                        bits::decompose_scalar::<N>(right)
-                            .iter()
-                            .map(|bit| vec![*bit]),
-                    )
-                    .chain(std::iter::once(vec![out]))
-                    .collect(),
+                vec![
+                    bits::decompose_scalar::<N>(left).to_vec(),
+                    bits::decompose_scalar::<N>(right).to_vec(),
+                    vec![out],
+                ],
             )
         }
     }
@@ -996,24 +1044,24 @@ mod tests {
         }
 
         fn configure(cs: &mut plonk::ConstraintSystem<Scalar>) -> Self::Config {
-            let left = std::array::from_fn(|_| cs.instance_column());
-            let right = std::array::from_fn(|_| cs.instance_column());
-            let bits = std::array::from_fn(|_| cs.advice_column());
-            for i in 0..N {
-                cs.enable_equality(left[i]);
-                cs.enable_equality(right[i]);
-                cs.enable_equality(bits[i]);
-            }
-            let out = cs.instance_column();
-            cs.enable_equality(out);
-            let expected = cs.advice_column();
+            let left_instance = cs.instance_column();
+            cs.enable_equality(left_instance);
+            let left = cs.advice_column();
+            cs.enable_equality(left);
+            let right_instance = cs.instance_column();
+            cs.enable_equality(right_instance);
+            let right = cs.advice_column();
+            cs.enable_equality(right);
+            let expected = cs.instance_column();
             cs.enable_equality(expected);
-            let chip = BitComparatorChip::<N>::configure(cs, bits);
+            let cmp = cs.advice_column();
+            cs.enable_equality(cmp);
+            let chip = BitComparatorChip::<N>::configure(cs, left, right, cmp);
             BitComparatorCircuitConfig {
-                left,
-                right,
-                out,
+                left: left_instance,
+                right: right_instance,
                 expected,
+                cmp,
                 chip,
             }
         }
@@ -1030,10 +1078,10 @@ mod tests {
                         .map(|i| {
                             region.assign_advice_from_instance(
                                 || "load_left",
-                                config.left[i],
-                                0,
-                                config.chip.bits[i],
-                                0,
+                                config.left,
+                                i,
+                                config.chip.left,
+                                i,
                             )
                         })
                         .collect::<Result<Vec<_>, _>>()?;
@@ -1041,10 +1089,10 @@ mod tests {
                         .map(|i| {
                             region.assign_advice_from_instance(
                                 || "load_right",
-                                config.right[i],
-                                0,
-                                config.chip.bits[i],
-                                1,
+                                config.right,
+                                i,
+                                config.chip.right,
+                                i,
                             )
                         })
                         .collect::<Result<Vec<_>, _>>()?;
@@ -1062,9 +1110,9 @@ mod tests {
                 |mut region| {
                     let expected = region.assign_advice_from_instance(
                         || "load_expected",
-                        config.out,
-                        0,
                         config.expected,
+                        0,
+                        config.cmp,
                         0,
                     )?;
                     region.constrain_equal(out.cell(), expected.cell())
@@ -1180,9 +1228,9 @@ mod tests {
 
     #[derive(Debug, Clone)]
     struct ConstBitComparatorCircuitConfig<const N: usize> {
-        input: [plonk::Column<plonk::Instance>; N],
-        out: plonk::Column<plonk::Instance>,
-        expected: plonk::Column<plonk::Advice>,
+        input: plonk::Column<plonk::Instance>,
+        expected: plonk::Column<plonk::Instance>,
+        cmp: plonk::Column<plonk::Advice>,
         chip: ConstBitComparatorConfig<N>,
     }
 
@@ -1195,13 +1243,9 @@ mod tests {
         fn verify(left: Scalar, right: Scalar, out: Scalar) -> Result<()> {
             let circuit = Self { constant: right };
             utils::test::verify_circuit(
-                4,
+                10,
                 &circuit,
-                bits::decompose_scalar::<N>(left)
-                    .iter()
-                    .map(|bit| vec![*bit])
-                    .chain(std::iter::once(vec![out]))
-                    .collect(),
+                vec![bits::decompose_scalar::<N>(left).to_vec(), vec![out]],
             )
         }
     }
@@ -1215,22 +1259,20 @@ mod tests {
         }
 
         fn configure(cs: &mut plonk::ConstraintSystem<Scalar>) -> Self::Config {
-            let input = std::array::from_fn(|_| cs.instance_column());
-            let binary_digits = cs.fixed_column();
-            let bits = std::array::from_fn(|_| cs.advice_column());
-            for i in 0..N {
-                cs.enable_equality(input[i]);
-                cs.enable_equality(bits[i]);
-            }
-            let out = cs.instance_column();
-            cs.enable_equality(out);
-            let expected = cs.advice_column();
+            let input = cs.instance_column();
+            cs.enable_equality(input);
+            let value = cs.advice_column();
+            cs.enable_equality(value);
+            let constant = cs.fixed_column();
+            let expected = cs.instance_column();
             cs.enable_equality(expected);
-            let chip = ConstBitComparatorChip::<N>::configure(cs, binary_digits, bits);
+            let cmp = cs.advice_column();
+            cs.enable_equality(cmp);
+            let chip = ConstBitComparatorChip::<N>::configure(cs, value, constant, cmp);
             ConstBitComparatorCircuitConfig {
                 input,
-                out,
                 expected,
+                cmp,
                 chip,
             }
         }
@@ -1247,10 +1289,10 @@ mod tests {
                         .map(|i| {
                             region.assign_advice_from_instance(
                                 || "load_input",
-                                config.input[i],
-                                0,
-                                config.chip.bits[i],
-                                0,
+                                config.input,
+                                i,
+                                config.chip.value,
+                                i,
                             )
                         })
                         .collect::<Result<Vec<_>, _>>()
@@ -1267,9 +1309,9 @@ mod tests {
                 |mut region| {
                     let expected = region.assign_advice_from_instance(
                         || "load_expected",
-                        config.out,
-                        0,
                         config.expected,
+                        0,
+                        config.cmp,
                         0,
                     )?;
                     region.constrain_equal(out.cell(), expected.cell())
@@ -1383,7 +1425,7 @@ mod tests {
     #[derive(Debug, Clone)]
     struct FullBitDecomposerCircuitConfig {
         value: plonk::Column<plonk::Instance>,
-        bits: [plonk::Column<plonk::Instance>; 256],
+        bits: plonk::Column<plonk::Instance>,
         chip: FullBitDecomposerConfig,
     }
 
@@ -1391,13 +1433,14 @@ mod tests {
     struct FullBitDecomposerCircuit {}
 
     impl FullBitDecomposerCircuit {
-        fn verify(&self, value: Scalar, bits: [Scalar; 256]) -> Result<()> {
+        fn verify(&self, value: Scalar, decomposition: U256) -> Result<()> {
             utils::test::verify_circuit(
-                4,
+                10,
                 self,
-                std::iter::once(vec![value])
-                    .chain(bits.map(|bit| vec![bit]))
-                    .collect(),
+                vec![
+                    vec![value],
+                    bits::decompose_bits::<256>(decomposition).to_vec(),
+                ],
             )
         }
     }
@@ -1412,20 +1455,17 @@ mod tests {
 
         fn configure(cs: &mut plonk::ConstraintSystem<Scalar>) -> Self::Config {
             let value_instance = cs.instance_column();
-            let bit_instances = std::array::from_fn(|_| cs.instance_column());
-            let binary_digits = cs.fixed_column();
-            let value = cs.advice_column();
-            let bits = std::array::from_fn(|_| cs.advice_column());
             cs.enable_equality(value_instance);
+            let bits_instance = cs.instance_column();
+            cs.enable_equality(bits_instance);
+            let value = cs.advice_column();
             cs.enable_equality(value);
-            for i in 0..256 {
-                cs.enable_equality(bit_instances[i]);
-                cs.enable_equality(bits[i]);
-            }
+            let range = cs.fixed_column();
+            let cmp = cs.advice_column();
             FullBitDecomposerCircuitConfig {
                 value: value_instance,
-                bits: bit_instances,
-                chip: FullBitDecomposerChip::configure(cs, binary_digits, value, bits),
+                bits: bits_instance,
+                chip: FullBitDecomposerChip::configure(cs, value, range, cmp),
             }
         }
 
@@ -1441,17 +1481,17 @@ mod tests {
                         || "load_value",
                         config.value,
                         0,
-                        config.chip.decomposer.value,
+                        config.chip.value,
                         0,
                     )?;
                     let bits = (0..256)
                         .map(|i| {
                             region.assign_advice_from_instance(
                                 || "load_bits",
-                                config.bits[i],
-                                0,
-                                config.chip.decomposer.bits[i],
-                                0,
+                                config.bits,
+                                i,
+                                config.chip.value,
+                                i + 1,
                             )
                         })
                         .collect::<Result<Vec<_>, _>>()?;
@@ -1474,26 +1514,83 @@ mod tests {
     }
 
     #[test]
-    fn test_full_bit_decomposer() {
+    fn test_full_decomposer_zero() {
         let circuit = FullBitDecomposerCircuit::default();
-        let value = utils::parse_pallas_scalar(
-            "0x0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
-        );
-        assert!(circuit.verify(value, bits::decompose_scalar(value)).is_ok());
-        let value = Scalar::ZERO - Scalar::from(1);
-        assert!(circuit.verify(value, bits::decompose_scalar(value)).is_ok());
+        assert!(circuit.verify(Scalar::ZERO, 0.into()).is_ok());
+        assert!(circuit.verify(Scalar::ZERO, 1.into()).is_err());
+        assert!(circuit.verify(Scalar::ZERO, 2.into()).is_err());
+        assert!(circuit.verify(Scalar::ZERO, 3.into()).is_err());
+        assert!(circuit.verify(Scalar::ZERO, 4.into()).is_err());
+        let q = utils::pallas_scalar_modulus();
+        assert!(circuit.verify(Scalar::ZERO, q - 2).is_err());
+        assert!(circuit.verify(Scalar::ZERO, q - 1).is_err());
+        assert!(circuit.verify(Scalar::ZERO, q).is_err());
+        assert!(circuit.verify(Scalar::ZERO, q + 1).is_err());
+        assert!(circuit.verify(Scalar::ZERO, q + 2).is_err());
     }
 
     #[test]
-    fn test_anti_aliasing() {
+    fn test_full_decomposer_one() {
         let circuit = FullBitDecomposerCircuit::default();
-        assert!(
-            circuit
-                .verify(
-                    42.into(),
-                    bits::decompose_bits(utils::pallas_scalar_modulus() + 42)
-                )
-                .is_err()
-        );
+        assert!(circuit.verify(1.into(), 0.into()).is_err());
+        assert!(circuit.verify(1.into(), 1.into()).is_ok());
+        assert!(circuit.verify(1.into(), 2.into()).is_err());
+        assert!(circuit.verify(1.into(), 3.into()).is_err());
+        assert!(circuit.verify(1.into(), 4.into()).is_err());
+        let q = utils::pallas_scalar_modulus();
+        assert!(circuit.verify(Scalar::ZERO, q - 2).is_err());
+        assert!(circuit.verify(Scalar::ZERO, q - 1).is_err());
+        assert!(circuit.verify(Scalar::ZERO, q).is_err());
+        assert!(circuit.verify(Scalar::ZERO, q + 1).is_err());
+        assert!(circuit.verify(Scalar::ZERO, q + 2).is_err());
+    }
+
+    #[test]
+    fn test_full_decomposer_two() {
+        let circuit = FullBitDecomposerCircuit::default();
+        assert!(circuit.verify(2.into(), 0.into()).is_err());
+        assert!(circuit.verify(2.into(), 1.into()).is_err());
+        assert!(circuit.verify(2.into(), 2.into()).is_ok());
+        assert!(circuit.verify(2.into(), 3.into()).is_err());
+        assert!(circuit.verify(2.into(), 4.into()).is_err());
+        let q = utils::pallas_scalar_modulus();
+        assert!(circuit.verify(Scalar::ZERO, q - 3).is_err());
+        assert!(circuit.verify(Scalar::ZERO, q - 2).is_err());
+        assert!(circuit.verify(Scalar::ZERO, q - 1).is_err());
+        assert!(circuit.verify(Scalar::ZERO, q).is_err());
+        assert!(circuit.verify(Scalar::ZERO, q + 1).is_err());
+        assert!(circuit.verify(Scalar::ZERO, q + 2).is_err());
+        assert!(circuit.verify(Scalar::ZERO, q + 3).is_err());
+    }
+
+    #[test]
+    fn test_full_decomposer_with_large_value() {
+        let circuit = FullBitDecomposerCircuit::default();
+        let value = "0x0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20";
+        let scalar = utils::parse_pallas_scalar(value);
+        let value = value.parse::<U256>().unwrap();
+        assert!(circuit.verify(scalar, value - 1).is_err());
+        assert!(circuit.verify(scalar, value).is_ok());
+        assert!(circuit.verify(scalar, value + 1).is_err());
+        let q = utils::pallas_scalar_modulus();
+        assert!(circuit.verify(scalar, q + value - 1).is_err());
+        assert!(circuit.verify(scalar, q + value).is_err());
+        assert!(circuit.verify(scalar, q + value + 1).is_err());
+    }
+
+    #[test]
+    fn test_full_decomposer_with_q_minus_one() {
+        let circuit = FullBitDecomposerCircuit::default();
+        let value = Scalar::ZERO - Scalar::from(1);
+        let q = utils::pallas_scalar_modulus();
+        assert!(circuit.verify(value, 0.into()).is_err());
+        assert!(circuit.verify(value, 1.into()).is_err());
+        assert!(circuit.verify(value, 2.into()).is_err());
+        assert!(circuit.verify(value, q - 3).is_err());
+        assert!(circuit.verify(value, q - 2).is_err());
+        assert!(circuit.verify(value, q - 1).is_ok());
+        assert!(circuit.verify(value, q).is_err());
+        assert!(circuit.verify(value, q + 1).is_err());
+        assert!(circuit.verify(value, q + 2).is_err());
     }
 }
