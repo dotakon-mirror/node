@@ -688,7 +688,6 @@ pub type ProgramStorageProof = MerkleProof<u64>;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ff::PrimeField;
 
     fn test_scalar1() -> Scalar {
         Scalar::from_repr_vartime([
@@ -1388,11 +1387,17 @@ mod tests {
             cs.enable_equality(key);
             let value = cs.instance_column();
             cs.enable_equality(value);
+            let constants = cs.fixed_column();
             let key_to_decompose = cs.advice_column();
-            let range = cs.fixed_column();
+            let range = cs.advice_column();
             let cmp = cs.advice_column();
-            let full_bit_decomposer =
-                chips::FullBitDecomposerChip::configure(cs, key_to_decompose, range, cmp);
+            let full_bit_decomposer = chips::FullBitDecomposerChip::configure(
+                cs,
+                constants,
+                key_to_decompose,
+                range,
+                cmp,
+            );
             let poseidon = chips::configure_poseidon(cs);
             let chip = LookupChip::configure(cs, full_bit_decomposer, poseidon);
             LookupCircuitConfig {

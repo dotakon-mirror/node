@@ -1,5 +1,6 @@
 use crate::bits;
 use crate::utils;
+use ff::Field;
 use halo2_gadgets::poseidon;
 use halo2_poseidon::{ConstantLength, P128Pow5T3};
 use halo2_proofs::{circuit, plonk, poly};
@@ -322,8 +323,9 @@ impl<const N: usize> circuit::Chip<Scalar> for BitComparatorChip<N> {
 
 #[derive(Debug, Clone)]
 pub struct ConstBitComparatorConfig<const N: usize> {
+    binary_digits: plonk::Column<plonk::Fixed>,
     value: plonk::Column<plonk::Advice>,
-    constant: plonk::Column<plonk::Fixed>,
+    constant: plonk::Column<plonk::Advice>,
     cmp: plonk::Column<plonk::Advice>,
     half_selector: plonk::Selector,
     full_selector: plonk::Selector,
@@ -346,17 +348,20 @@ pub struct ConstBitComparatorChip<const N: usize> {
 impl<const N: usize> ConstBitComparatorChip<N> {
     pub fn configure(
         cs: &mut plonk::ConstraintSystem<Scalar>,
+        binary_digits: plonk::Column<plonk::Fixed>,
         value: plonk::Column<plonk::Advice>,
-        constant: plonk::Column<plonk::Fixed>,
+        constant: plonk::Column<plonk::Advice>,
         cmp: plonk::Column<plonk::Advice>,
     ) -> ConstBitComparatorConfig<N> {
         assert!(N > 0);
+        cs.enable_equality(binary_digits);
         cs.enable_equality(value);
+        cs.enable_equality(constant);
         let half_selector = cs.selector();
         cs.create_gate("half_cmp", |cells| {
             let selector = cells.query_selector(half_selector);
             let left = cells.query_advice(value, poly::Rotation::cur());
-            let right = cells.query_fixed(constant);
+            let right = cells.query_advice(constant, poly::Rotation::cur());
             let cmp = cells.query_advice(cmp, poly::Rotation::cur());
             vec![selector * (cmp - left + right)]
         });
@@ -364,7 +369,7 @@ impl<const N: usize> ConstBitComparatorChip<N> {
         cs.create_gate("full_cmp", |cells| {
             let selector = cells.query_selector(full_selector);
             let left = cells.query_advice(value, poly::Rotation::cur());
-            let right = cells.query_fixed(constant);
+            let right = cells.query_advice(constant, poly::Rotation::cur());
             let prev = cells.query_advice(cmp, poly::Rotation::next());
             let curr = cells.query_advice(cmp, poly::Rotation::cur());
             vec![
@@ -375,6 +380,7 @@ impl<const N: usize> ConstBitComparatorChip<N> {
             ]
         });
         ConstBitComparatorConfig {
+            binary_digits,
             value,
             constant,
             cmp,
@@ -394,6 +400,24 @@ impl<const N: usize> ConstBitComparatorChip<N> {
         constant: U256,
     ) -> Result<AssignedCell, plonk::Error> {
         assert!(N > 0);
+        let (zero, one) = layouter.assign_region(
+            || "init_binary_digits",
+            |mut region| {
+                let zero = region.assign_fixed(
+                    || "init_zero",
+                    self.config.binary_digits,
+                    0,
+                    || circuit::Value::known(Scalar::ZERO),
+                )?;
+                let one = region.assign_fixed(
+                    || "init_one",
+                    self.config.binary_digits,
+                    1,
+                    || circuit::Value::known(Scalar::from(1)),
+                )?;
+                Ok((zero, one))
+            },
+        )?;
         let const_bits = bits::decompose_bits::<N>(constant);
         layouter.assign_region(
             || "cmp",
@@ -406,12 +430,17 @@ impl<const N: usize> ConstBitComparatorChip<N> {
                     || input[N - 1].value().cloned(),
                 )?;
                 region.constrain_equal(assigned_left.cell(), input[N - 1].cell())?;
-                let assigned_right = region.assign_fixed(
+                let assigned_right = region.assign_advice(
                     || format!("load_const({})", N - 1),
                     self.config.constant,
                     N - 1,
                     || circuit::Value::known(const_bits[N - 1]),
                 )?;
+                if const_bits[N - 1] != Scalar::ZERO {
+                    region.constrain_equal(assigned_right.cell(), one.cell())?;
+                } else {
+                    region.constrain_equal(assigned_right.cell(), zero.cell())?;
+                }
                 let mut out = region.assign_advice(
                     || format!("cmp({})", N - 1),
                     self.config.cmp,
@@ -427,12 +456,17 @@ impl<const N: usize> ConstBitComparatorChip<N> {
                         || input[i].value().cloned(),
                     )?;
                     region.constrain_equal(assigned_left.cell(), input[i].cell())?;
-                    let assigned_right = region.assign_fixed(
+                    let assigned_right = region.assign_advice(
                         || format!("load_const({})", i),
                         self.config.constant,
                         i,
                         || circuit::Value::known(const_bits[i]),
                     )?;
+                    if const_bits[i] != Scalar::ZERO {
+                        region.constrain_equal(assigned_right.cell(), one.cell())?;
+                    } else {
+                        region.constrain_equal(assigned_right.cell(), zero.cell())?;
+                    }
                     let square = out.value().map(|out| out.square());
                     out = region.assign_advice(
                         || format!("cmp({})", i),
@@ -471,8 +505,9 @@ impl<const N: usize> circuit::Chip<Scalar> for ConstBitComparatorChip<N> {
 /// decomposed into the bit representation of 4 rather than q+4.
 #[derive(Debug, Clone)]
 pub struct FullBitDecomposerConfig {
+    constants: plonk::Column<plonk::Fixed>,
     value: plonk::Column<plonk::Advice>,
-    range: plonk::Column<plonk::Fixed>,
+    range: plonk::Column<plonk::Advice>,
     cmp: plonk::Column<plonk::Advice>,
     bit_selector: plonk::Selector,
     sum_selector: plonk::Selector,
@@ -489,11 +524,14 @@ pub struct FullBitDecomposerChip {
 impl FullBitDecomposerChip {
     pub fn configure(
         cs: &mut plonk::ConstraintSystem<Scalar>,
+        constants: plonk::Column<plonk::Fixed>,
         value: plonk::Column<plonk::Advice>,
-        range: plonk::Column<plonk::Fixed>,
+        range: plonk::Column<plonk::Advice>,
         cmp: plonk::Column<plonk::Advice>,
     ) -> FullBitDecomposerConfig {
+        cs.enable_equality(constants);
         cs.enable_equality(value);
+        cs.enable_equality(range);
         let bit_selector = cs.selector();
         cs.create_gate("bit", |cells| {
             let selector = cells.query_selector(bit_selector);
@@ -517,7 +555,7 @@ impl FullBitDecomposerChip {
         cs.create_gate("half_cmp", |cells| {
             let selector = cells.query_selector(half_cmp_selector);
             let left = cells.query_advice(value, poly::Rotation::cur());
-            let right = cells.query_fixed(range);
+            let right = cells.query_advice(range, poly::Rotation::cur());
             let cmp = cells.query_advice(cmp, poly::Rotation::cur());
             vec![selector * (cmp - left + right)]
         });
@@ -525,7 +563,7 @@ impl FullBitDecomposerChip {
         cs.create_gate("full_cmp", |cells| {
             let selector = cells.query_selector(full_cmp_selector);
             let left = cells.query_advice(value, poly::Rotation::cur());
-            let right = cells.query_fixed(range);
+            let right = cells.query_advice(range, poly::Rotation::cur());
             let prev = cells.query_advice(cmp, poly::Rotation::next());
             let curr = cells.query_advice(cmp, poly::Rotation::cur());
             vec![
@@ -542,6 +580,7 @@ impl FullBitDecomposerChip {
             vec![selector * (cmp + plonk::Expression::Constant(1.into()))]
         });
         FullBitDecomposerConfig {
+            constants,
             value,
             range,
             cmp,
@@ -562,6 +601,24 @@ impl FullBitDecomposerChip {
         layouter: &mut impl circuit::Layouter<Scalar>,
         input: AssignedCell,
     ) -> Result<[AssignedCell; 256], plonk::Error> {
+        let (zero, one) = layouter.assign_region(
+            || "init_constants",
+            |mut region| {
+                let zero = region.assign_fixed(
+                    || "init_zero",
+                    self.config.constants,
+                    0,
+                    || circuit::Value::known(Scalar::ZERO),
+                )?;
+                let one = region.assign_fixed(
+                    || "init_one",
+                    self.config.constants,
+                    1,
+                    || circuit::Value::known(Scalar::from(1)),
+                )?;
+                Ok((zero, one))
+            },
+        )?;
         let range_bits = bits::decompose_bits::<256>(utils::pallas_scalar_modulus());
         Ok(layouter
             .assign_region(
@@ -585,14 +642,20 @@ impl FullBitDecomposerChip {
                             region.assign_advice(|| "extract_bit", self.config.value, i + 1, || bit)
                         })
                         .collect::<Result<Vec<_>, plonk::Error>>()?;
-                    let range_bits = (0..256)
+                    let range_bit_cells = (0..256)
                         .map(|i| {
-                            region.assign_fixed(
+                            let bit = region.assign_advice(
                                 || "init_range_bit",
                                 self.config.range,
                                 i + 1,
                                 || circuit::Value::known(range_bits[i]),
-                            )
+                            )?;
+                            if range_bits[i] != Scalar::ZERO {
+                                region.constrain_equal(bit.cell(), one.cell())?;
+                            } else {
+                                region.constrain_equal(bit.cell(), zero.cell())?;
+                            }
+                            Ok(bit)
                         })
                         .collect::<Result<Vec<_>, plonk::Error>>()?;
                     self.config.half_cmp_selector.enable(&mut region, 256)?;
@@ -600,7 +663,7 @@ impl FullBitDecomposerChip {
                         || "cmp",
                         self.config.cmp,
                         256,
-                        || bits[255].value() - range_bits[255].value(),
+                        || bits[255].value() - range_bit_cells[255].value(),
                     )?;
                     for i in (0..255).rev() {
                         self.config.full_cmp_selector.enable(&mut region, i + 1)?;
@@ -612,7 +675,7 @@ impl FullBitDecomposerChip {
                             || {
                                 cmp.value()
                                     + (circuit::Value::known(Scalar::from(1)) - square)
-                                        * (bits[i].value() - range_bits[i].value())
+                                        * (bits[i].value() - range_bit_cells[i].value())
                             },
                         )?;
                     }
@@ -641,7 +704,6 @@ impl circuit::Chip<Scalar> for FullBitDecomposerChip {
 mod tests {
     use super::*;
     use anyhow::Result;
-    use ff::Field;
 
     #[derive(Debug, Clone)]
     struct PoseidonCircuitConfig<const L: usize> {
@@ -1261,14 +1323,16 @@ mod tests {
         fn configure(cs: &mut plonk::ConstraintSystem<Scalar>) -> Self::Config {
             let input = cs.instance_column();
             cs.enable_equality(input);
+            let binary_digits = cs.fixed_column();
             let value = cs.advice_column();
             cs.enable_equality(value);
-            let constant = cs.fixed_column();
+            let constant = cs.advice_column();
             let expected = cs.instance_column();
             cs.enable_equality(expected);
             let cmp = cs.advice_column();
             cs.enable_equality(cmp);
-            let chip = ConstBitComparatorChip::<N>::configure(cs, value, constant, cmp);
+            let chip =
+                ConstBitComparatorChip::<N>::configure(cs, binary_digits, value, constant, cmp);
             ConstBitComparatorCircuitConfig {
                 input,
                 expected,
@@ -1458,14 +1522,15 @@ mod tests {
             cs.enable_equality(value_instance);
             let bits_instance = cs.instance_column();
             cs.enable_equality(bits_instance);
+            let constants = cs.fixed_column();
             let value = cs.advice_column();
             cs.enable_equality(value);
-            let range = cs.fixed_column();
+            let range = cs.advice_column();
             let cmp = cs.advice_column();
             FullBitDecomposerCircuitConfig {
                 value: value_instance,
                 bits: bits_instance,
-                chip: FullBitDecomposerChip::configure(cs, value, range, cmp),
+                chip: FullBitDecomposerChip::configure(cs, constants, value, range, cmp),
             }
         }
 
