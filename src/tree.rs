@@ -1,8 +1,8 @@
-use crate::bits;
 use crate::chips;
 use crate::dotakon;
 use crate::proto;
 use crate::utils;
+use crate::xits;
 use anyhow::{Result, anyhow};
 use ff::{Field, PrimeField};
 use halo2_proofs::{circuit, plonk, poly};
@@ -230,7 +230,7 @@ impl<
 
     fn get_bit(&self, key: K) -> bool {
         let count = Scalar::from((self.level - 1) as u64);
-        bits::and1(bits::shr(key.into(), count)) != Scalar::ZERO
+        xits::and1(xits::shr(key.into(), count)) != Scalar::ZERO
     }
 }
 
@@ -313,7 +313,7 @@ impl<K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static> Merkle
         let mut key = self.key.into();
         let mut hash = self.value_as_scalar;
         for (left, right) in self.path {
-            let bit = bits::and1(key);
+            let bit = xits::and1(key);
             let not = Scalar::from(1) - bit;
             if bit * (hash - right) + not * (hash - left) != Scalar::ZERO {
                 return Err(anyhow!(
@@ -323,7 +323,7 @@ impl<K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static> Merkle
                     utils::pallas_scalar_to_u256(hash),
                 ));
             }
-            key = bits::shr(key, 1.into());
+            key = xits::shr(key, 1.into());
             hash = utils::poseidon_hash([left, right]);
         }
         if hash != self.root_hash {

@@ -1,6 +1,6 @@
-use crate::bits;
 use crate::utils;
-use ff::Field;
+use crate::xits;
+use ff::{Field, PrimeField};
 use halo2_gadgets::poseidon;
 use halo2_poseidon::{ConstantLength, P128Pow5T3};
 use halo2_proofs::{circuit, plonk, poly};
@@ -143,8 +143,8 @@ impl<const N: usize> BitDecomposerChip<N> {
                     Ok((0..N)
                         .map(|i| {
                             self.config.bit_selector.enable(&mut region, i + 1)?;
-                            let bit = value.map(bits::and1);
-                            value = value.map(bits::shr1);
+                            let bit = value.map(xits::and1);
+                            value = value.map(xits::shr1);
                             region.assign_advice(|| "extract_bit", self.config.value, i + 1, || bit)
                         })
                         .collect::<Result<Vec<_>, _>>()?)
@@ -418,7 +418,7 @@ impl<const N: usize> ConstBitComparatorChip<N> {
                 Ok((zero, one))
             },
         )?;
-        let const_bits = bits::decompose_bits::<N>(constant);
+        let const_bits = xits::decompose_bits::<N>(constant);
         layouter.assign_region(
             || "cmp",
             |mut region| {
@@ -619,7 +619,7 @@ impl FullBitDecomposerChip {
                 Ok((zero, one))
             },
         )?;
-        let range_bits = bits::decompose_bits::<256>(utils::pallas_scalar_modulus());
+        let range_bits = xits::decompose_bits::<256>(utils::pallas_scalar_modulus());
         Ok(layouter
             .assign_region(
                 || "decompose",
@@ -637,8 +637,8 @@ impl FullBitDecomposerChip {
                     let bits = (0..256)
                         .map(|i| {
                             self.config.bit_selector.enable(&mut region, i + 1)?;
-                            let bit = value.map(bits::and1);
-                            value = value.map(bits::shr1);
+                            let bit = value.map(xits::and1);
+                            value = value.map(xits::shr1);
                             region.assign_advice(|| "extract_bit", self.config.value, i + 1, || bit)
                         })
                         .collect::<Result<Vec<_>, plonk::Error>>()?;
@@ -689,6 +689,275 @@ impl FullBitDecomposerChip {
 
 impl circuit::Chip<Scalar> for FullBitDecomposerChip {
     type Config = FullBitDecomposerConfig;
+    type Loaded = ();
+
+    fn config(&self) -> &Self::Config {
+        &self.config
+    }
+
+    fn loaded(&self) -> &Self::Loaded {
+        &()
+    }
+}
+
+/// Decomposes a scalar value into its base 3 representation. "Trit" is a term we use to indicate a
+/// "base 3 bit".
+///
+/// Similarly to the `FullBitDecomposerChip`, this chip decomposes the 161 "trits" and performs a
+/// "tritwise" comparison with q (the field order), preventing aliasing.
+#[derive(Debug, Clone)]
+pub struct FullTritDecomposerConfig {
+    digits: plonk::TableColumn,
+    constants: plonk::Column<plonk::Fixed>,
+    value: plonk::Column<plonk::Advice>,
+    range: plonk::Column<plonk::Advice>,
+    cmp: plonk::Column<plonk::Advice>,
+    trit_selector: plonk::Selector,
+    sum_selector: plonk::Selector,
+    half_cmp_selector: plonk::Selector,
+    full_cmp_selector: plonk::Selector,
+    range_check_selector: plonk::Selector,
+}
+
+#[derive(Debug)]
+pub struct FullTritDecomposerChip {
+    config: FullTritDecomposerConfig,
+}
+
+impl FullTritDecomposerChip {
+    pub fn configure(
+        cs: &mut plonk::ConstraintSystem<Scalar>,
+        constants: plonk::Column<plonk::Fixed>,
+        value: plonk::Column<plonk::Advice>,
+        range: plonk::Column<plonk::Advice>,
+        cmp: plonk::Column<plonk::Advice>,
+    ) -> FullTritDecomposerConfig {
+        let digits = cs.lookup_table_column();
+        cs.enable_equality(constants);
+        cs.enable_equality(value);
+        cs.enable_equality(range);
+        let trit_selector = cs.complex_selector();
+        cs.lookup(|cells| {
+            let selector = cells.query_selector(trit_selector);
+            let trit = cells.query_advice(value, poly::Rotation::cur());
+            vec![(selector * trit, digits)]
+        });
+        let sum_selector = cs.selector();
+        cs.create_gate("sum", |cells| {
+            let selector = cells.query_selector(sum_selector);
+            let mut total = cells.query_advice(value, poly::Rotation(0));
+            let mut power = 1.into();
+            let three = Scalar::from(3);
+            for i in 1..=161 {
+                let trit = cells.query_advice(value, poly::Rotation(i as i32));
+                total = total - plonk::Expression::Constant(power) * trit;
+                power *= three;
+            }
+            vec![selector * total]
+        });
+        let half_cmp_selector = cs.selector();
+        cs.create_gate("half_cmp", |cells| {
+            let selector = cells.query_selector(half_cmp_selector);
+            let left = cells.query_advice(value, poly::Rotation::cur());
+            let right = cells.query_advice(range, poly::Rotation::cur());
+            let cmp = cells.query_advice(cmp, poly::Rotation::cur());
+            vec![
+                selector
+                    * (plonk::Expression::Constant(2.into()) * cmp
+                        - (left.clone() - right.clone())
+                            * (left.clone() * right.clone() - left - right
+                                + plonk::Expression::Constant(3.into()))),
+            ]
+        });
+        let full_cmp_selector = cs.selector();
+        cs.create_gate("full_cmp", |cells| {
+            let selector = cells.query_selector(full_cmp_selector);
+            let left = cells.query_advice(value, poly::Rotation::cur());
+            let right = cells.query_advice(range, poly::Rotation::cur());
+            let prev = cells.query_advice(cmp, poly::Rotation::next());
+            let curr = cells.query_advice(cmp, poly::Rotation::cur());
+            vec![
+                selector
+                    * (plonk::Expression::Constant(2.into()) * (curr - prev.clone())
+                        - (plonk::Expression::Constant(1.into()) - prev.square())
+                            * (left.clone() - right.clone())
+                            * (left.clone() * right.clone() - left - right
+                                + plonk::Expression::Constant(3.into()))),
+            ]
+        });
+        let range_check_selector = cs.selector();
+        cs.create_gate("check_range", |cells| {
+            let selector = cells.query_selector(range_check_selector);
+            let cmp = cells.query_advice(cmp, poly::Rotation::cur());
+            vec![selector * (cmp + plonk::Expression::Constant(1.into()))]
+        });
+        FullTritDecomposerConfig {
+            digits,
+            constants,
+            value,
+            range,
+            cmp,
+            trit_selector,
+            sum_selector,
+            half_cmp_selector,
+            full_cmp_selector,
+            range_check_selector,
+        }
+    }
+
+    pub fn construct(config: FullTritDecomposerConfig) -> Self {
+        Self { config }
+    }
+
+    fn idiv2(value: Scalar) -> Scalar {
+        let d = utils::u256_to_pallas_scalar(utils::pallas_scalar_modulus() >> 1).unwrap();
+        if value < d {
+            xits::shr1(value)
+        } else {
+            -xits::shr1(-value)
+        }
+    }
+
+    pub fn assign(
+        &self,
+        layouter: &mut impl circuit::Layouter<Scalar>,
+        input: AssignedCell,
+    ) -> Result<[AssignedCell; 161], plonk::Error> {
+        layouter.assign_table(
+            || "init_digits",
+            |mut table| {
+                table.assign_cell(
+                    || "zero",
+                    self.config.digits,
+                    0,
+                    || circuit::Value::known(Scalar::ZERO),
+                )?;
+                table.assign_cell(
+                    || "one",
+                    self.config.digits,
+                    1,
+                    || circuit::Value::known(Scalar::from(1)),
+                )?;
+                table.assign_cell(
+                    || "two",
+                    self.config.digits,
+                    2,
+                    || circuit::Value::known(Scalar::from(2)),
+                )?;
+                Ok(())
+            },
+        )?;
+        let (zero, one, two) = layouter.assign_region(
+            || "init_constants",
+            |mut region| {
+                let zero = region.assign_fixed(
+                    || "init_zero",
+                    self.config.constants,
+                    0,
+                    || circuit::Value::known(Scalar::ZERO),
+                )?;
+                let one = region.assign_fixed(
+                    || "init_one",
+                    self.config.constants,
+                    1,
+                    || circuit::Value::known(Scalar::from(1)),
+                )?;
+                let two = region.assign_fixed(
+                    || "init_two",
+                    self.config.constants,
+                    2,
+                    || circuit::Value::known(Scalar::from(2)),
+                )?;
+                Ok((zero, one, two))
+            },
+        )?;
+        let range_trits = xits::decompose_trits::<161>(utils::pallas_scalar_modulus());
+        Ok(layouter
+            .assign_region(
+                || "decompose",
+                |mut region| {
+                    self.config.sum_selector.enable(&mut region, 0)?;
+                    self.config.range_check_selector.enable(&mut region, 1)?;
+                    let value = region.assign_advice(
+                        || "load_value",
+                        self.config.value,
+                        0,
+                        || input.value().cloned(),
+                    )?;
+                    region.constrain_equal(value.cell(), input.cell())?;
+                    let mut value = value.value().cloned();
+                    let trits = (0..161)
+                        .map(|i| {
+                            self.config.trit_selector.enable(&mut region, i + 1)?;
+                            let trit = value.map(xits::mod3);
+                            value = value.map(xits::div3);
+                            region.assign_advice(
+                                || "extract_trit",
+                                self.config.value,
+                                i + 1,
+                                || trit,
+                            )
+                        })
+                        .collect::<Result<Vec<_>, plonk::Error>>()?;
+                    let range_trit_cells = (0..161)
+                        .map(|i| {
+                            let trit = region.assign_advice(
+                                || "init_range_trit",
+                                self.config.range,
+                                i + 1,
+                                || circuit::Value::known(range_trits[i]),
+                            )?;
+                            let repr = range_trits[i].to_repr();
+                            region.constrain_equal(
+                                trit.cell(),
+                                [zero.cell(), one.cell(), two.cell()][repr[0] as usize],
+                            )?;
+                            Ok(trit)
+                        })
+                        .collect::<Result<Vec<_>, plonk::Error>>()?;
+                    self.config.half_cmp_selector.enable(&mut region, 161)?;
+                    let mut cmp = region.assign_advice(
+                        || "cmp",
+                        self.config.cmp,
+                        161,
+                        || {
+                            ((trits[160].value() - range_trit_cells[160].value())
+                                * (trits[160].value() * range_trit_cells[160].value()
+                                    - trits[160].value()
+                                    - range_trit_cells[160].value()
+                                    + circuit::Value::known(Scalar::from(3))))
+                            .map(Self::idiv2)
+                        },
+                    )?;
+                    for i in (0..160).rev() {
+                        self.config.full_cmp_selector.enable(&mut region, i + 1)?;
+                        let square = cmp.value().map(|cmp| cmp.square());
+                        cmp = region.assign_advice(
+                            || "cmp",
+                            self.config.cmp,
+                            i + 1,
+                            || {
+                                cmp.value()
+                                    + (circuit::Value::known(Scalar::from(1)) - square)
+                                        * ((trits[i].value() - range_trit_cells[i].value())
+                                            * (trits[i].value() * range_trit_cells[i].value()
+                                                - trits[i].value()
+                                                - range_trit_cells[i].value()
+                                                + circuit::Value::known(Scalar::from(3))))
+                                        .map(Self::idiv2)
+                            },
+                        )?;
+                    }
+                    Ok(trits)
+                },
+            )?
+            .try_into()
+            .unwrap())
+    }
+}
+
+impl circuit::Chip<Scalar> for FullTritDecomposerChip {
+    type Config = FullTritDecomposerConfig;
     type Loaded = ();
 
     fn config(&self) -> &Self::Config {
@@ -1040,22 +1309,22 @@ mod tests {
         let circuit = BitDecomposerCircuit::<10>::default();
         assert!(
             circuit
-                .verify(256.into(), bits::decompose_bits(256.into()))
+                .verify(256.into(), xits::decompose_bits(256.into()))
                 .is_ok()
         );
         assert!(
             circuit
-                .verify(257.into(), bits::decompose_bits(257.into()))
+                .verify(257.into(), xits::decompose_bits(257.into()))
                 .is_ok()
         );
         assert!(
             circuit
-                .verify(258.into(), bits::decompose_bits(258.into()))
+                .verify(258.into(), xits::decompose_bits(258.into()))
                 .is_ok()
         );
         assert!(
             circuit
-                .verify(259.into(), bits::decompose_bits(259.into()))
+                .verify(259.into(), xits::decompose_bits(259.into()))
                 .is_ok()
         );
     }
@@ -1066,9 +1335,17 @@ mod tests {
         let value = utils::parse_pallas_scalar(
             "0x0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
         );
-        assert!(circuit.verify(value, bits::decompose_scalar(value)).is_ok());
+        assert!(
+            circuit
+                .verify(value, xits::decompose_scalar_bits(value))
+                .is_ok()
+        );
         let value = Scalar::ZERO - Scalar::from(1);
-        assert!(circuit.verify(value, bits::decompose_scalar(value)).is_ok());
+        assert!(
+            circuit
+                .verify(value, xits::decompose_scalar_bits(value))
+                .is_ok()
+        );
     }
 
     #[derive(Debug, Clone)]
@@ -1089,8 +1366,8 @@ mod tests {
                 10,
                 self,
                 vec![
-                    bits::decompose_scalar::<N>(left).to_vec(),
-                    bits::decompose_scalar::<N>(right).to_vec(),
+                    xits::decompose_scalar_bits::<N>(left).to_vec(),
+                    xits::decompose_scalar_bits::<N>(right).to_vec(),
                     vec![out],
                 ],
             )
@@ -1307,7 +1584,7 @@ mod tests {
             utils::test::verify_circuit(
                 10,
                 &circuit,
-                vec![bits::decompose_scalar::<N>(left).to_vec(), vec![out]],
+                vec![xits::decompose_scalar_bits::<N>(left).to_vec(), vec![out]],
             )
         }
     }
@@ -1503,7 +1780,7 @@ mod tests {
                 self,
                 vec![
                     vec![value],
-                    bits::decompose_bits::<256>(decomposition).to_vec(),
+                    xits::decompose_bits::<256>(decomposition).to_vec(),
                 ],
             )
         }
@@ -1579,7 +1856,7 @@ mod tests {
     }
 
     #[test]
-    fn test_full_decomposer_zero() {
+    fn test_full_bit_decomposer_zero() {
         let circuit = FullBitDecomposerCircuit::default();
         assert!(circuit.verify(Scalar::ZERO, 0.into()).is_ok());
         assert!(circuit.verify(Scalar::ZERO, 1.into()).is_err());
@@ -1595,7 +1872,7 @@ mod tests {
     }
 
     #[test]
-    fn test_full_decomposer_one() {
+    fn test_full_bit_decomposer_one() {
         let circuit = FullBitDecomposerCircuit::default();
         assert!(circuit.verify(1.into(), 0.into()).is_err());
         assert!(circuit.verify(1.into(), 1.into()).is_ok());
@@ -1603,15 +1880,15 @@ mod tests {
         assert!(circuit.verify(1.into(), 3.into()).is_err());
         assert!(circuit.verify(1.into(), 4.into()).is_err());
         let q = utils::pallas_scalar_modulus();
-        assert!(circuit.verify(Scalar::ZERO, q - 2).is_err());
-        assert!(circuit.verify(Scalar::ZERO, q - 1).is_err());
-        assert!(circuit.verify(Scalar::ZERO, q).is_err());
-        assert!(circuit.verify(Scalar::ZERO, q + 1).is_err());
-        assert!(circuit.verify(Scalar::ZERO, q + 2).is_err());
+        assert!(circuit.verify(1.into(), q - 2).is_err());
+        assert!(circuit.verify(1.into(), q - 1).is_err());
+        assert!(circuit.verify(1.into(), q).is_err());
+        assert!(circuit.verify(1.into(), q + 1).is_err());
+        assert!(circuit.verify(1.into(), q + 2).is_err());
     }
 
     #[test]
-    fn test_full_decomposer_two() {
+    fn test_full_bit_decomposer_two() {
         let circuit = FullBitDecomposerCircuit::default();
         assert!(circuit.verify(2.into(), 0.into()).is_err());
         assert!(circuit.verify(2.into(), 1.into()).is_err());
@@ -1619,17 +1896,53 @@ mod tests {
         assert!(circuit.verify(2.into(), 3.into()).is_err());
         assert!(circuit.verify(2.into(), 4.into()).is_err());
         let q = utils::pallas_scalar_modulus();
-        assert!(circuit.verify(Scalar::ZERO, q - 3).is_err());
-        assert!(circuit.verify(Scalar::ZERO, q - 2).is_err());
-        assert!(circuit.verify(Scalar::ZERO, q - 1).is_err());
-        assert!(circuit.verify(Scalar::ZERO, q).is_err());
-        assert!(circuit.verify(Scalar::ZERO, q + 1).is_err());
-        assert!(circuit.verify(Scalar::ZERO, q + 2).is_err());
-        assert!(circuit.verify(Scalar::ZERO, q + 3).is_err());
+        assert!(circuit.verify(2.into(), q - 3).is_err());
+        assert!(circuit.verify(2.into(), q - 2).is_err());
+        assert!(circuit.verify(2.into(), q - 1).is_err());
+        assert!(circuit.verify(2.into(), q).is_err());
+        assert!(circuit.verify(2.into(), q + 1).is_err());
+        assert!(circuit.verify(2.into(), q + 2).is_err());
+        assert!(circuit.verify(2.into(), q + 3).is_err());
     }
 
     #[test]
-    fn test_full_decomposer_with_large_value() {
+    fn test_full_bit_decomposer_three() {
+        let circuit = FullBitDecomposerCircuit::default();
+        assert!(circuit.verify(3.into(), 0.into()).is_err());
+        assert!(circuit.verify(3.into(), 1.into()).is_err());
+        assert!(circuit.verify(3.into(), 2.into()).is_err());
+        assert!(circuit.verify(3.into(), 3.into()).is_ok());
+        assert!(circuit.verify(3.into(), 4.into()).is_err());
+        let q = utils::pallas_scalar_modulus();
+        assert!(circuit.verify(3.into(), q - 4).is_err());
+        assert!(circuit.verify(3.into(), q - 3).is_err());
+        assert!(circuit.verify(3.into(), q - 2).is_err());
+        assert!(circuit.verify(3.into(), q).is_err());
+        assert!(circuit.verify(3.into(), q + 2).is_err());
+        assert!(circuit.verify(3.into(), q + 3).is_err());
+        assert!(circuit.verify(3.into(), q + 4).is_err());
+    }
+
+    #[test]
+    fn test_full_bit_decomposer_four() {
+        let circuit = FullBitDecomposerCircuit::default();
+        assert!(circuit.verify(4.into(), 0.into()).is_err());
+        assert!(circuit.verify(4.into(), 1.into()).is_err());
+        assert!(circuit.verify(4.into(), 2.into()).is_err());
+        assert!(circuit.verify(4.into(), 3.into()).is_err());
+        assert!(circuit.verify(4.into(), 4.into()).is_ok());
+        let q = utils::pallas_scalar_modulus();
+        assert!(circuit.verify(4.into(), q - 5).is_err());
+        assert!(circuit.verify(4.into(), q - 4).is_err());
+        assert!(circuit.verify(4.into(), q - 3).is_err());
+        assert!(circuit.verify(4.into(), q).is_err());
+        assert!(circuit.verify(4.into(), q + 3).is_err());
+        assert!(circuit.verify(4.into(), q + 4).is_err());
+        assert!(circuit.verify(4.into(), q + 5).is_err());
+    }
+
+    #[test]
+    fn test_full_bit_decomposer_with_large_value() {
         let circuit = FullBitDecomposerCircuit::default();
         let value = "0x0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20";
         let scalar = utils::parse_pallas_scalar(value);
@@ -1644,7 +1957,7 @@ mod tests {
     }
 
     #[test]
-    fn test_full_decomposer_with_q_minus_one() {
+    fn test_full_bit_decomposer_with_q_minus_one() {
         let circuit = FullBitDecomposerCircuit::default();
         let value = Scalar::ZERO - Scalar::from(1);
         let q = utils::pallas_scalar_modulus();
@@ -1657,5 +1970,327 @@ mod tests {
         assert!(circuit.verify(value, q).is_err());
         assert!(circuit.verify(value, q + 1).is_err());
         assert!(circuit.verify(value, q + 2).is_err());
+    }
+
+    #[derive(Debug, Clone)]
+    struct FullTritDecomposerCircuitConfig {
+        value: plonk::Column<plonk::Instance>,
+        trits: plonk::Column<plonk::Instance>,
+        chip: FullTritDecomposerConfig,
+    }
+
+    #[derive(Debug, Default)]
+    struct FullTritDecomposerCircuit {}
+
+    impl FullTritDecomposerCircuit {
+        fn verify(&self, value: Scalar, decomposition: U256) -> Result<()> {
+            utils::test::verify_circuit(
+                10,
+                self,
+                vec![
+                    vec![value],
+                    xits::decompose_trits::<161>(decomposition).to_vec(),
+                ],
+            )
+        }
+    }
+
+    impl plonk::Circuit<Scalar> for FullTritDecomposerCircuit {
+        type Config = FullTritDecomposerCircuitConfig;
+        type FloorPlanner = circuit::floor_planner::V1;
+
+        fn without_witnesses(&self) -> Self {
+            Self::default()
+        }
+
+        fn configure(cs: &mut plonk::ConstraintSystem<Scalar>) -> Self::Config {
+            let value_instance = cs.instance_column();
+            cs.enable_equality(value_instance);
+            let trits_instance = cs.instance_column();
+            cs.enable_equality(trits_instance);
+            let constants = cs.fixed_column();
+            let value = cs.advice_column();
+            cs.enable_equality(value);
+            let range = cs.advice_column();
+            let cmp = cs.advice_column();
+            FullTritDecomposerCircuitConfig {
+                value: value_instance,
+                trits: trits_instance,
+                chip: FullTritDecomposerChip::configure(cs, constants, value, range, cmp),
+            }
+        }
+
+        fn synthesize(
+            &self,
+            config: Self::Config,
+            mut layouter: impl circuit::Layouter<Scalar>,
+        ) -> Result<(), plonk::Error> {
+            let (value, trits) = layouter.assign_region(
+                || "load",
+                |mut region| {
+                    let value = region.assign_advice_from_instance(
+                        || "load_value",
+                        config.value,
+                        0,
+                        config.chip.value,
+                        0,
+                    )?;
+                    let trits = (0..161)
+                        .map(|i| {
+                            region.assign_advice_from_instance(
+                                || "load_trits",
+                                config.trits,
+                                i,
+                                config.chip.value,
+                                i + 1,
+                            )
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    Ok((value, trits))
+                },
+            )?;
+            let chip = FullTritDecomposerChip::construct(config.chip);
+            let out = chip.assign(&mut layouter.namespace(|| "decompose"), value)?;
+            layouter.assign_region(
+                || "check",
+                |mut region| {
+                    for i in 0..161 {
+                        region.constrain_equal(out[i].cell(), trits[i].cell())?;
+                    }
+                    Ok(())
+                },
+            )?;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_full_trit_decomposer_zero() {
+        let circuit = FullTritDecomposerCircuit::default();
+        assert!(circuit.verify(Scalar::ZERO, 0.into()).is_ok());
+        assert!(circuit.verify(Scalar::ZERO, 1.into()).is_err());
+        assert!(circuit.verify(Scalar::ZERO, 2.into()).is_err());
+        assert!(circuit.verify(Scalar::ZERO, 3.into()).is_err());
+        assert!(circuit.verify(Scalar::ZERO, 4.into()).is_err());
+        assert!(circuit.verify(Scalar::ZERO, 5.into()).is_err());
+        assert!(circuit.verify(Scalar::ZERO, 6.into()).is_err());
+        assert!(circuit.verify(Scalar::ZERO, 7.into()).is_err());
+        assert!(circuit.verify(Scalar::ZERO, 8.into()).is_err());
+        assert!(circuit.verify(Scalar::ZERO, 9.into()).is_err());
+        let q = utils::pallas_scalar_modulus();
+        assert!(circuit.verify(Scalar::ZERO, q - 3).is_err());
+        assert!(circuit.verify(Scalar::ZERO, q - 2).is_err());
+        assert!(circuit.verify(Scalar::ZERO, q - 1).is_err());
+        assert!(circuit.verify(Scalar::ZERO, q).is_err());
+        assert!(circuit.verify(Scalar::ZERO, q + 1).is_err());
+        assert!(circuit.verify(Scalar::ZERO, q + 2).is_err());
+        assert!(circuit.verify(Scalar::ZERO, q + 3).is_err());
+    }
+
+    #[test]
+    fn test_full_trit_decomposer_one() {
+        let circuit = FullTritDecomposerCircuit::default();
+        assert!(circuit.verify(1.into(), 0.into()).is_err());
+        assert!(circuit.verify(1.into(), 1.into()).is_ok());
+        assert!(circuit.verify(1.into(), 2.into()).is_err());
+        assert!(circuit.verify(1.into(), 3.into()).is_err());
+        assert!(circuit.verify(1.into(), 4.into()).is_err());
+        assert!(circuit.verify(1.into(), 5.into()).is_err());
+        assert!(circuit.verify(1.into(), 6.into()).is_err());
+        assert!(circuit.verify(1.into(), 7.into()).is_err());
+        assert!(circuit.verify(1.into(), 8.into()).is_err());
+        assert!(circuit.verify(1.into(), 9.into()).is_err());
+        let q = utils::pallas_scalar_modulus();
+        assert!(circuit.verify(1.into(), q - 3).is_err());
+        assert!(circuit.verify(1.into(), q - 2).is_err());
+        assert!(circuit.verify(1.into(), q - 1).is_err());
+        assert!(circuit.verify(1.into(), q).is_err());
+        assert!(circuit.verify(1.into(), q + 1).is_err());
+        assert!(circuit.verify(1.into(), q + 2).is_err());
+        assert!(circuit.verify(1.into(), q + 3).is_err());
+    }
+
+    #[test]
+    fn test_full_trit_decomposer_two() {
+        let circuit = FullTritDecomposerCircuit::default();
+        assert!(circuit.verify(2.into(), 0.into()).is_err());
+        assert!(circuit.verify(2.into(), 1.into()).is_err());
+        assert!(circuit.verify(2.into(), 2.into()).is_ok());
+        assert!(circuit.verify(2.into(), 3.into()).is_err());
+        assert!(circuit.verify(2.into(), 4.into()).is_err());
+        assert!(circuit.verify(2.into(), 5.into()).is_err());
+        assert!(circuit.verify(2.into(), 6.into()).is_err());
+        assert!(circuit.verify(2.into(), 7.into()).is_err());
+        assert!(circuit.verify(2.into(), 8.into()).is_err());
+        assert!(circuit.verify(2.into(), 9.into()).is_err());
+        let q = utils::pallas_scalar_modulus();
+        assert!(circuit.verify(2.into(), q - 3).is_err());
+        assert!(circuit.verify(2.into(), q - 2).is_err());
+        assert!(circuit.verify(2.into(), q - 1).is_err());
+        assert!(circuit.verify(2.into(), q).is_err());
+        assert!(circuit.verify(2.into(), q + 1).is_err());
+        assert!(circuit.verify(2.into(), q + 2).is_err());
+        assert!(circuit.verify(2.into(), q + 3).is_err());
+    }
+
+    #[test]
+    fn test_full_trit_decomposer_three() {
+        let circuit = FullTritDecomposerCircuit::default();
+        assert!(circuit.verify(3.into(), 0.into()).is_err());
+        assert!(circuit.verify(3.into(), 1.into()).is_err());
+        assert!(circuit.verify(3.into(), 2.into()).is_err());
+        assert!(circuit.verify(3.into(), 3.into()).is_ok());
+        assert!(circuit.verify(3.into(), 4.into()).is_err());
+        assert!(circuit.verify(3.into(), 5.into()).is_err());
+        assert!(circuit.verify(3.into(), 6.into()).is_err());
+        assert!(circuit.verify(3.into(), 7.into()).is_err());
+        assert!(circuit.verify(3.into(), 8.into()).is_err());
+        assert!(circuit.verify(3.into(), 9.into()).is_err());
+        let q = utils::pallas_scalar_modulus();
+        assert!(circuit.verify(3.into(), q - 4).is_err());
+        assert!(circuit.verify(3.into(), q - 3).is_err());
+        assert!(circuit.verify(3.into(), q - 2).is_err());
+        assert!(circuit.verify(3.into(), q).is_err());
+        assert!(circuit.verify(3.into(), q + 2).is_err());
+        assert!(circuit.verify(3.into(), q + 3).is_err());
+        assert!(circuit.verify(3.into(), q + 4).is_err());
+    }
+
+    #[test]
+    fn test_full_trit_decomposer_four() {
+        let circuit = FullTritDecomposerCircuit::default();
+        assert!(circuit.verify(4.into(), 0.into()).is_err());
+        assert!(circuit.verify(4.into(), 1.into()).is_err());
+        assert!(circuit.verify(4.into(), 2.into()).is_err());
+        assert!(circuit.verify(4.into(), 3.into()).is_err());
+        assert!(circuit.verify(4.into(), 4.into()).is_ok());
+        assert!(circuit.verify(4.into(), 5.into()).is_err());
+        assert!(circuit.verify(4.into(), 6.into()).is_err());
+        assert!(circuit.verify(4.into(), 7.into()).is_err());
+        assert!(circuit.verify(4.into(), 8.into()).is_err());
+        assert!(circuit.verify(4.into(), 9.into()).is_err());
+        let q = utils::pallas_scalar_modulus();
+        assert!(circuit.verify(4.into(), q - 5).is_err());
+        assert!(circuit.verify(4.into(), q - 4).is_err());
+        assert!(circuit.verify(4.into(), q - 3).is_err());
+        assert!(circuit.verify(4.into(), q).is_err());
+        assert!(circuit.verify(4.into(), q + 3).is_err());
+        assert!(circuit.verify(4.into(), q + 4).is_err());
+        assert!(circuit.verify(4.into(), q + 5).is_err());
+    }
+
+    #[test]
+    fn test_full_trit_decomposer_five() {
+        let circuit = FullTritDecomposerCircuit::default();
+        assert!(circuit.verify(5.into(), 0.into()).is_err());
+        assert!(circuit.verify(5.into(), 1.into()).is_err());
+        assert!(circuit.verify(5.into(), 2.into()).is_err());
+        assert!(circuit.verify(5.into(), 3.into()).is_err());
+        assert!(circuit.verify(5.into(), 4.into()).is_err());
+        assert!(circuit.verify(5.into(), 5.into()).is_ok());
+        assert!(circuit.verify(5.into(), 6.into()).is_err());
+        assert!(circuit.verify(5.into(), 7.into()).is_err());
+        assert!(circuit.verify(5.into(), 8.into()).is_err());
+        assert!(circuit.verify(5.into(), 9.into()).is_err());
+        let q = utils::pallas_scalar_modulus();
+        assert!(circuit.verify(5.into(), q - 6).is_err());
+        assert!(circuit.verify(5.into(), q - 5).is_err());
+        assert!(circuit.verify(5.into(), q - 4).is_err());
+        assert!(circuit.verify(5.into(), q).is_err());
+        assert!(circuit.verify(5.into(), q + 4).is_err());
+        assert!(circuit.verify(5.into(), q + 5).is_err());
+        assert!(circuit.verify(5.into(), q + 6).is_err());
+    }
+
+    #[test]
+    fn test_full_trit_decomposer_six() {
+        let circuit = FullTritDecomposerCircuit::default();
+        assert!(circuit.verify(6.into(), 0.into()).is_err());
+        assert!(circuit.verify(6.into(), 1.into()).is_err());
+        assert!(circuit.verify(6.into(), 2.into()).is_err());
+        assert!(circuit.verify(6.into(), 3.into()).is_err());
+        assert!(circuit.verify(6.into(), 4.into()).is_err());
+        assert!(circuit.verify(6.into(), 5.into()).is_err());
+        assert!(circuit.verify(6.into(), 6.into()).is_ok());
+        assert!(circuit.verify(6.into(), 7.into()).is_err());
+        assert!(circuit.verify(6.into(), 8.into()).is_err());
+        assert!(circuit.verify(6.into(), 9.into()).is_err());
+        let q = utils::pallas_scalar_modulus();
+        assert!(circuit.verify(6.into(), q - 7).is_err());
+        assert!(circuit.verify(6.into(), q - 6).is_err());
+        assert!(circuit.verify(6.into(), q - 5).is_err());
+        assert!(circuit.verify(6.into(), q).is_err());
+        assert!(circuit.verify(6.into(), q + 5).is_err());
+        assert!(circuit.verify(6.into(), q + 6).is_err());
+        assert!(circuit.verify(6.into(), q + 7).is_err());
+    }
+
+    #[test]
+    fn test_full_trit_decomposer_seven() {
+        let circuit = FullTritDecomposerCircuit::default();
+        assert!(circuit.verify(7.into(), 0.into()).is_err());
+        assert!(circuit.verify(7.into(), 1.into()).is_err());
+        assert!(circuit.verify(7.into(), 2.into()).is_err());
+        assert!(circuit.verify(7.into(), 3.into()).is_err());
+        assert!(circuit.verify(7.into(), 4.into()).is_err());
+        assert!(circuit.verify(7.into(), 5.into()).is_err());
+        assert!(circuit.verify(7.into(), 6.into()).is_err());
+        assert!(circuit.verify(7.into(), 7.into()).is_ok());
+        assert!(circuit.verify(7.into(), 8.into()).is_err());
+        assert!(circuit.verify(7.into(), 9.into()).is_err());
+        let q = utils::pallas_scalar_modulus();
+        assert!(circuit.verify(7.into(), q - 8).is_err());
+        assert!(circuit.verify(7.into(), q - 7).is_err());
+        assert!(circuit.verify(7.into(), q - 6).is_err());
+        assert!(circuit.verify(7.into(), q).is_err());
+        assert!(circuit.verify(7.into(), q + 6).is_err());
+        assert!(circuit.verify(7.into(), q + 7).is_err());
+        assert!(circuit.verify(7.into(), q + 8).is_err());
+    }
+
+    #[test]
+    fn test_full_trit_decomposer_eight() {
+        let circuit = FullTritDecomposerCircuit::default();
+        assert!(circuit.verify(8.into(), 0.into()).is_err());
+        assert!(circuit.verify(8.into(), 1.into()).is_err());
+        assert!(circuit.verify(8.into(), 2.into()).is_err());
+        assert!(circuit.verify(8.into(), 3.into()).is_err());
+        assert!(circuit.verify(8.into(), 4.into()).is_err());
+        assert!(circuit.verify(8.into(), 5.into()).is_err());
+        assert!(circuit.verify(8.into(), 6.into()).is_err());
+        assert!(circuit.verify(8.into(), 7.into()).is_err());
+        assert!(circuit.verify(8.into(), 8.into()).is_ok());
+        assert!(circuit.verify(8.into(), 9.into()).is_err());
+        let q = utils::pallas_scalar_modulus();
+        assert!(circuit.verify(8.into(), q - 9).is_err());
+        assert!(circuit.verify(8.into(), q - 8).is_err());
+        assert!(circuit.verify(8.into(), q - 7).is_err());
+        assert!(circuit.verify(8.into(), q).is_err());
+        assert!(circuit.verify(8.into(), q + 7).is_err());
+        assert!(circuit.verify(8.into(), q + 8).is_err());
+        assert!(circuit.verify(8.into(), q + 9).is_err());
+    }
+
+    #[test]
+    fn test_full_trit_decomposer_nine() {
+        let circuit = FullTritDecomposerCircuit::default();
+        assert!(circuit.verify(9.into(), 0.into()).is_err());
+        assert!(circuit.verify(9.into(), 1.into()).is_err());
+        assert!(circuit.verify(9.into(), 2.into()).is_err());
+        assert!(circuit.verify(9.into(), 3.into()).is_err());
+        assert!(circuit.verify(9.into(), 4.into()).is_err());
+        assert!(circuit.verify(9.into(), 5.into()).is_err());
+        assert!(circuit.verify(9.into(), 6.into()).is_err());
+        assert!(circuit.verify(9.into(), 7.into()).is_err());
+        assert!(circuit.verify(9.into(), 8.into()).is_err());
+        assert!(circuit.verify(9.into(), 9.into()).is_ok());
+        let q = utils::pallas_scalar_modulus();
+        assert!(circuit.verify(9.into(), q - 10).is_err());
+        assert!(circuit.verify(9.into(), q - 9).is_err());
+        assert!(circuit.verify(9.into(), q - 8).is_err());
+        assert!(circuit.verify(9.into(), q).is_err());
+        assert!(circuit.verify(9.into(), q + 8).is_err());
+        assert!(circuit.verify(9.into(), q + 9).is_err());
+        assert!(circuit.verify(9.into(), q + 10).is_err());
     }
 }

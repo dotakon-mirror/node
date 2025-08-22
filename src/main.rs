@@ -6,7 +6,6 @@ use rand_core::{OsRng, RngCore};
 use std::sync::Arc;
 use tonic::transport::Server;
 
-mod bits;
 mod chips;
 mod clock;
 mod db;
@@ -20,6 +19,7 @@ mod topology;
 mod tree;
 mod utils;
 mod version;
+mod xits;
 
 #[cfg(test)]
 mod fake;
