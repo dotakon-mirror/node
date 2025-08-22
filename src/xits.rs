@@ -33,9 +33,15 @@ pub fn decompose_scalar_bits<const N: usize>(value: Scalar) -> [Scalar; N] {
     decompose_bits::<N>(utils::pallas_scalar_to_u256(value))
 }
 
+pub fn div_pow3(value: Scalar, exp: u8) -> Scalar {
+    let dividend = utils::pallas_scalar_to_u256(value);
+    let divisor = U256::from(3).pow(U256::from(exp));
+    utils::u256_to_pallas_scalar(dividend / divisor).unwrap()
+}
+
 pub fn div3(value: Scalar) -> Scalar {
-    let value = utils::pallas_scalar_to_u256(value);
-    utils::u256_to_pallas_scalar(value / 3).unwrap()
+    let dividend = utils::pallas_scalar_to_u256(value);
+    utils::u256_to_pallas_scalar(dividend / 3).unwrap()
 }
 
 pub fn mod3(value: Scalar) -> Scalar {

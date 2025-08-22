@@ -1985,7 +1985,7 @@ mod tests {
     impl FullTritDecomposerCircuit {
         fn verify(&self, value: Scalar, decomposition: U256) -> Result<()> {
             utils::test::verify_circuit(
-                10,
+                9,
                 self,
                 vec![
                     vec![value],

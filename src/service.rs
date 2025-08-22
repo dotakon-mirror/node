@@ -434,7 +434,7 @@ mod tests {
 
     fn genesis_block_hash() -> Scalar {
         utils::u256_to_pallas_scalar(
-            "0x1997012f8a7fd8e4c3db28b5f5679f86af9c4754acc0810d5b5de4a854396a79"
+            "0x0eddc2fada9f04438bf248362bef6c2a68b2e65810cc03bf601a640846e083a0"
                 .parse()
                 .unwrap(),
         )
@@ -528,13 +528,13 @@ mod tests {
             proto::pallas_scalar_from_bytes32(&payload.account_balances_root_hash.unwrap())
                 .unwrap(),
             utils::parse_pallas_scalar(
-                "0x3246b50f4df2b94373bfc5f31f01d504e2dd6c839506d70a9cd02a3a6805d01a"
+                "0x3a58ebcf79758fe999e34819d451118b52ca59d7bbaadc089272bc776c9b3694"
             )
         );
         assert_eq!(
             proto::pallas_scalar_from_bytes32(&payload.program_storage_root_hash.unwrap()).unwrap(),
             utils::parse_pallas_scalar(
-                "0x0c43ae48cdea4fd4d77e811f272ea8303ffbd567fa75d0caac1a86e1dc9dd5db"
+                "0x0be3ca4b0a4448535236e535ac540862bf480d41edede21f27c98915cf51e0ed"
             )
         );
     }
@@ -579,13 +579,13 @@ mod tests {
             proto::pallas_scalar_from_bytes32(&payload.account_balances_root_hash.unwrap())
                 .unwrap(),
             utils::parse_pallas_scalar(
-                "0x3246b50f4df2b94373bfc5f31f01d504e2dd6c839506d70a9cd02a3a6805d01a"
+                "0x3a58ebcf79758fe999e34819d451118b52ca59d7bbaadc089272bc776c9b3694"
             )
         );
         assert_eq!(
             proto::pallas_scalar_from_bytes32(&payload.program_storage_root_hash.unwrap()).unwrap(),
             utils::parse_pallas_scalar(
-                "0x0c43ae48cdea4fd4d77e811f272ea8303ffbd567fa75d0caac1a86e1dc9dd5db"
+                "0x0be3ca4b0a4448535236e535ac540862bf480d41edede21f27c98915cf51e0ed"
             )
         );
     }

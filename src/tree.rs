@@ -4,7 +4,7 @@ use crate::proto;
 use crate::utils;
 use crate::xits;
 use anyhow::{Result, anyhow};
-use ff::{Field, PrimeField};
+use ff::PrimeField;
 use halo2_proofs::{circuit, plonk, poly};
 use pasta_curves::pallas::Scalar;
 use std::any::Any;
@@ -62,7 +62,7 @@ trait Node<
 >: Debug + Send + Sync + AsScalar + 'static
 {
     fn get(&self, key: K) -> &V;
-    fn lookup(&self, key: K) -> (&V, Vec<(Scalar, Scalar)>);
+    fn lookup(&self, key: K) -> (&V, Vec<[Scalar; 3]>);
     fn put(&self, key: K, value: V) -> Arc<dyn Node<K, V>>;
 }
 
@@ -71,7 +71,7 @@ struct PhantomNodes<
     K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
     V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
 > {
-    nodes: [Arc<dyn Node<K, V>>; 257],
+    nodes: [Arc<dyn Node<K, V>>; 162],
 }
 
 impl<
@@ -93,8 +93,11 @@ impl<
         let mut nodes = vec![];
         let mut node: Arc<dyn Node<K, V>> = Arc::new(Leaf::new(V::default()));
         nodes.push(node.clone());
-        for level in 1..=256 {
-            node = Arc::new(InternalNode::new(level, node.clone(), node.clone()));
+        for level in 1..=161 {
+            node = Arc::new(InternalNode::new(
+                level,
+                [node.clone(), node.clone(), node.clone()],
+            ));
             nodes.push(node.clone());
         }
         Self {
@@ -181,7 +184,7 @@ impl<
         &self.value
     }
 
-    fn lookup(&self, _key: K) -> (&V, Vec<(Scalar, Scalar)>) {
+    fn lookup(&self, _key: K) -> (&V, Vec<[Scalar; 3]>) {
         (&self.value, vec![])
     }
 
@@ -208,8 +211,7 @@ struct InternalNode<
     // TODO: convert `level` to a generic const argument when Rust supports generic const argument
     // expressions. See <https://github.com/rust-lang/rust/issues/76560>.
     level: usize,
-    left: Arc<dyn Node<K, V>>,
-    right: Arc<dyn Node<K, V>>,
+    children: [Arc<dyn Node<K, V>>; 3],
     hash: Scalar,
 }
 
@@ -218,19 +220,23 @@ impl<
     V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
 > InternalNode<K, V>
 {
-    fn new(level: usize, left: Arc<dyn Node<K, V>>, right: Arc<dyn Node<K, V>>) -> Self {
-        let hash = utils::poseidon_hash([left.as_scalar(), right.as_scalar()]);
+    fn new(level: usize, children: [Arc<dyn Node<K, V>>; 3]) -> Self {
+        let hash = utils::poseidon_hash([
+            children[0].as_scalar(),
+            children[1].as_scalar(),
+            children[2].as_scalar(),
+        ]);
         Self {
             level,
-            left,
-            right,
+            children,
             hash,
         }
     }
 
-    fn get_bit(&self, key: K) -> bool {
-        let count = Scalar::from((self.level - 1) as u64);
-        xits::and1(xits::shr(key.into(), count)) != Scalar::ZERO
+    fn get_trit(&self, key: K) -> usize {
+        let count = (self.level - 1) as u8;
+        let trit = xits::mod3(xits::div_pow3(key.into(), count));
+        trit.to_repr()[0] as usize
     }
 }
 
@@ -240,30 +246,27 @@ impl<
 > Node<K, V> for InternalNode<K, V>
 {
     fn get(&self, key: K) -> &V {
-        if self.get_bit(key) {
-            self.right.get(key)
-        } else {
-            self.left.get(key)
-        }
+        self.children[self.get_trit(key)].get(key)
     }
 
-    fn lookup(&self, key: K) -> (&V, Vec<(Scalar, Scalar)>) {
-        let (value, mut path) = if self.get_bit(key) {
-            self.right.lookup(key)
-        } else {
-            self.left.lookup(key)
-        };
-        path.push((self.left.as_scalar(), self.right.as_scalar()));
+    fn lookup(&self, key: K) -> (&V, Vec<[Scalar; 3]>) {
+        let (value, mut path) = self.children[self.get_trit(key)].lookup(key);
+        path.push([
+            self.children[0].as_scalar(),
+            self.children[1].as_scalar(),
+            self.children[2].as_scalar(),
+        ]);
         (value, path)
     }
 
     fn put(&self, key: K, value: V) -> Arc<dyn Node<K, V>> {
-        let (left, right) = if self.get_bit(key) {
-            (self.left.clone(), self.right.put(key, value))
-        } else {
-            (self.left.put(key, value), self.right.clone())
-        };
-        Arc::new(Self::new(self.level, left, right))
+        let mut children = [
+            self.children[0].clone(),
+            self.children[1].clone(),
+            self.children[2].clone(),
+        ];
+        children[self.get_trit(key)] = children[self.get_trit(key)].put(key, value);
+        Arc::new(Self::new(self.level, children))
     }
 }
 
@@ -281,7 +284,7 @@ impl<
 pub struct MerkleProof<K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static> {
     key: K,
     value_as_scalar: Scalar,
-    path: [(Scalar, Scalar); 256],
+    path: [[Scalar; 3]; 161],
     root_hash: Scalar,
 }
 
@@ -294,7 +297,7 @@ impl<K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static> Merkle
         self.value_as_scalar
     }
 
-    pub fn path(&self) -> &[(Scalar, Scalar); 256] {
+    pub fn path(&self) -> &[[Scalar; 3]; 161] {
         &self.path
     }
 
@@ -312,19 +315,20 @@ impl<K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static> Merkle
         }
         let mut key = self.key.into();
         let mut hash = self.value_as_scalar;
-        for (left, right) in self.path {
-            let bit = xits::and1(key);
-            let not = Scalar::from(1) - bit;
-            if bit * (hash - right) + not * (hash - left) != Scalar::ZERO {
+        for children in self.path {
+            let trit = xits::mod3(key);
+            let trit = trit.to_repr()[0] as usize;
+            if hash != children[trit] {
                 return Err(anyhow!(
-                    "hash mismatch: got {:#x} or {:#x}, want {:#x}",
-                    utils::pallas_scalar_to_u256(left),
-                    utils::pallas_scalar_to_u256(right),
+                    "hash mismatch: got {:#x} or {:#x} or {:#x}, want {:#x}",
+                    utils::pallas_scalar_to_u256(children[0]),
+                    utils::pallas_scalar_to_u256(children[1]),
+                    utils::pallas_scalar_to_u256(children[2]),
                     utils::pallas_scalar_to_u256(hash),
                 ));
             }
-            key = xits::shr(key, 1.into());
-            hash = utils::poseidon_hash([left, right]);
+            key = xits::div3(key);
+            hash = utils::poseidon_hash(children);
         }
         if hash != self.root_hash {
             return Err(anyhow!(
@@ -353,9 +357,8 @@ impl<K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static> Merkle
             path: self
                 .path
                 .iter()
-                .map(|(left, right)| dotakon::merkle_proof::Node {
-                    left_child_hash: Some(proto::pallas_scalar_to_bytes32(*left)),
-                    right_child_hash: Some(proto::pallas_scalar_to_bytes32(*right)),
+                .map(|children| dotakon::merkle_proof::Node {
+                    child_hashes: children.map(proto::pallas_scalar_to_bytes32).to_vec(),
                 })
                 .collect(),
         })
@@ -374,36 +377,31 @@ impl<K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static> Merkle
         }
         let value_as_scalar = proto.value.as_ref().unwrap().to_msg::<dotakon::Bytes32>()?;
         let value_as_scalar = proto::pallas_scalar_from_bytes32(&value_as_scalar)?;
-        let path: [(Scalar, Scalar); 256] = proto
+        let path: [[Scalar; 3]; 161] = proto
             .path
             .iter()
             .map(|node| {
-                let left = {
-                    if let Some(left_child_hash) = &node.left_child_hash {
-                        proto::pallas_scalar_from_bytes32(&left_child_hash)?
-                    } else {
-                        return Err(anyhow!("invalid Merkle proof: missing left child hash"));
-                    }
-                };
-                let right = {
-                    if let Some(right_child_hash) = &node.right_child_hash {
-                        proto::pallas_scalar_from_bytes32(&right_child_hash)?
-                    } else {
-                        return Err(anyhow!("invalid Merkle proof: missing right child hash"));
-                    }
-                };
-                Ok((left, right))
+                node.child_hashes
+                    .iter()
+                    .map(|hash| proto::pallas_scalar_from_bytes32(hash))
+                    .collect::<Result<Vec<_>>>()?
+                    .try_into()
+                    .map_err(|vec: Vec<Scalar>| {
+                        anyhow!(
+                            "invalid Merkle proof: found node with {} child hashes (expected 3)",
+                            vec.len()
+                        )
+                    })
             })
             .collect::<Result<Vec<_>>>()?
             .try_into()
-            .map_err(|vec: Vec<(Scalar, Scalar)>| {
+            .map_err(|vec: Vec<[Scalar; 3]>| {
                 anyhow!(
-                    "invalid Merkle proof: incorrect lookup path length (got {}, want 256)",
+                    "invalid Merkle proof: incorrect lookup path length (got {}, want 161)",
                     vec.len()
                 )
             })?;
-        let (left, right) = path[255];
-        let root_hash = utils::poseidon_hash([left, right]);
+        let root_hash = utils::poseidon_hash(path[160]);
         Ok(Self {
             key,
             value_as_scalar,
@@ -428,10 +426,9 @@ impl<K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static> Merkle
 #[derive(Debug, Clone)]
 pub struct LookupChipConfig {
     key: plonk::Column<plonk::Advice>,
-    left: plonk::Column<plonk::Advice>,
-    right: plonk::Column<plonk::Advice>,
+    children: [plonk::Column<plonk::Advice>; 3],
     hash: plonk::Column<plonk::Advice>,
-    full_bit_decomposer: chips::FullBitDecomposerConfig,
+    full_trit_decomposer: chips::FullTritDecomposerConfig,
     poseidon: chips::PoseidonConfig,
     step_selector: plonk::Selector,
 }
@@ -444,33 +441,45 @@ pub struct LookupChip {
 impl LookupChip {
     pub fn configure(
         cs: &mut plonk::ConstraintSystem<Scalar>,
-        full_bit_decomposer: chips::FullBitDecomposerConfig,
+        full_trit_decomposer: chips::FullTritDecomposerConfig,
         poseidon: chips::PoseidonConfig,
     ) -> LookupChipConfig {
         let key = cs.advice_column();
         cs.enable_equality(key);
-        let left = cs.advice_column();
-        cs.enable_equality(left);
-        let right = cs.advice_column();
-        cs.enable_equality(right);
+        let children = std::array::from_fn(|_| {
+            let column = cs.advice_column();
+            cs.enable_equality(column);
+            column
+        });
         let hash = cs.advice_column();
         cs.enable_equality(hash);
         let step_selector = cs.selector();
         cs.create_gate("step", |cells| {
             let selector = cells.query_selector(step_selector);
-            let bit = cells.query_advice(key, poly::Rotation::cur());
-            let left = cells.query_advice(left, poly::Rotation::cur());
-            let right = cells.query_advice(right, poly::Rotation::cur());
+            let trit = cells.query_advice(key, poly::Rotation::cur());
+            let child0 = cells.query_advice(children[0], poly::Rotation::cur());
+            let child1 = cells.query_advice(children[1], poly::Rotation::cur());
+            let child2 = cells.query_advice(children[2], poly::Rotation::cur());
             let hash = cells.query_advice(hash, poly::Rotation::cur());
-            let not = plonk::Expression::Constant(1.into()) - bit.clone();
-            vec![selector * (bit * (hash.clone() - right) + not * (hash - left))]
+            let square = trit.clone().square();
+            vec![
+                selector
+                    * ((square.clone() - plonk::Expression::Constant(3.into()) * trit.clone()
+                        + plonk::Expression::Constant(2.into()))
+                        * (hash.clone() - child0)
+                        + trit.clone()
+                            * (plonk::Expression::Constant(2.into()) - trit.clone())
+                            * (hash.clone() - child1)
+                        + trit.clone()
+                            * (trit - plonk::Expression::Constant(1.into()))
+                            * (hash - child2)),
+            ]
         });
         LookupChipConfig {
             key,
-            left,
-            right,
+            children,
             hash,
-            full_bit_decomposer,
+            full_trit_decomposer,
             poseidon,
             step_selector,
         }
@@ -487,48 +496,47 @@ impl LookupChip {
         key: chips::AssignedCell,
         merkle_proof: &MerkleProof<K>,
     ) -> Result<chips::AssignedCell, plonk::Error> {
-        let bit_decomposer =
-            chips::FullBitDecomposerChip::construct(self.config.full_bit_decomposer.clone());
-        let key_bits = bit_decomposer.assign(layouter, key)?;
+        let trit_decomposer =
+            chips::FullTritDecomposerChip::construct(self.config.full_trit_decomposer.clone());
+        let key_trits = trit_decomposer.assign(layouter, key)?;
         let value = layouter.assign_region(
             || "load_value",
             |mut region| {
                 region.assign_advice(
                     || "load_value",
-                    self.config.left,
+                    self.config.children[0],
                     0,
                     || circuit::Value::known(merkle_proof.value_as_scalar()),
                 )
             },
         )?;
-        let poseidon = chips::PoseidonChip::<2>::construct(self.config.poseidon.clone());
+        let poseidon = chips::PoseidonChip::<3>::construct(self.config.poseidon.clone());
         let mut hash = value.clone();
         let path = merkle_proof.path();
-        for i in 0..256 {
-            let (left, right) = layouter.assign_region(
+        for i in 0..161 {
+            let children = layouter.assign_region(
                 || "step",
                 |mut region| {
                     self.config.step_selector.enable(&mut region, 0)?;
-                    let key_bit = region.assign_advice(
+                    let key_trit = region.assign_advice(
                         || format!("key[{}]", i),
                         self.config.key,
                         0,
-                        || key_bits[i].value().cloned(),
+                        || key_trits[i].value().cloned(),
                     )?;
-                    region.constrain_equal(key_bit.cell(), key_bits[i].cell())?;
-                    let (left, right) = path[i];
-                    let left = region.assign_advice(
-                        || format!("left[{}]", i),
-                        self.config.left,
-                        0,
-                        || circuit::Value::known(left),
-                    )?;
-                    let right = region.assign_advice(
-                        || format!("right[{}]", i),
-                        self.config.right,
-                        0,
-                        || circuit::Value::known(right),
-                    )?;
+                    region.constrain_equal(key_trit.cell(), key_trits[i].cell())?;
+                    let children: [chips::AssignedCell; 3] = (0..3)
+                        .map(|j| {
+                            region.assign_advice(
+                                || format!("child[{}][{}]", i, j),
+                                self.config.children[j],
+                                0,
+                                || circuit::Value::known(path[i][j]),
+                            )
+                        })
+                        .collect::<Result<Vec<_>, _>>()?
+                        .try_into()
+                        .unwrap();
                     let hash2 = region.assign_advice(
                         || format!("load_hash[{}]", i),
                         self.config.hash,
@@ -536,13 +544,10 @@ impl LookupChip {
                         || hash.value().cloned(),
                     )?;
                     region.constrain_equal(hash.cell(), hash2.cell())?;
-                    Ok((left, right))
+                    Ok(children)
                 },
             )?;
-            hash = poseidon.assign(
-                &mut layouter.namespace(|| format!("hash[{}]", i)),
-                [left, right],
-            )?;
+            hash = poseidon.assign(&mut layouter.namespace(|| format!("hash[{}]", i)), children)?;
         }
         layouter.assign_region(
             || "check_root",
@@ -610,7 +615,7 @@ impl<
 {
     fn default() -> Self {
         Self {
-            root: PHANTOM_NODES.get(256),
+            root: PHANTOM_NODES.get(161),
         }
     }
 }
@@ -688,6 +693,7 @@ pub type ProgramStorageProof = MerkleProof<u64>;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ff::Field;
 
     fn test_scalar1() -> Scalar {
         Scalar::from_repr_vartime([
@@ -717,7 +723,7 @@ mod tests {
     fn test_initial_root_hash() {
         let tree = AccountBalanceTree::default();
         let hash = utils::parse_pallas_scalar(
-            "0x3246b50f4df2b94373bfc5f31f01d504e2dd6c839506d70a9cd02a3a6805d01a",
+            "0x3a58ebcf79758fe999e34819d451118b52ca59d7bbaadc089272bc776c9b3694",
         );
         assert_eq!(tree.root_hash(0), hash);
         assert_eq!(tree.root_hash(1), hash);
@@ -1240,7 +1246,7 @@ mod tests {
                 program_storage_root_hash: None,
             })
             .unwrap();
-        proto.path[123].left_child_hash = Some(proto::pallas_scalar_to_bytes32(Scalar::ZERO));
+        proto.path[123].child_hashes[0] = proto::pallas_scalar_to_bytes32(Scalar::ZERO);
         assert!(AccountBalanceProof::decode_and_verify(&proto, tree.root_hash(0)).is_err());
     }
 
@@ -1271,7 +1277,7 @@ mod tests {
                 program_storage_root_hash: None,
             })
             .unwrap();
-        proto.path[123].left_child_hash = Some(proto::pallas_scalar_to_bytes32(Scalar::ZERO));
+        proto.path[123].child_hashes[0] = proto::pallas_scalar_to_bytes32(Scalar::ZERO);
         assert!(AccountBalanceProof::decode_and_verify(&proto, tree.root_hash(0)).is_err());
     }
 
@@ -1365,7 +1371,7 @@ mod tests {
                 merkle_proof: MerkleProof {
                     key: Scalar::ZERO,
                     value_as_scalar: Scalar::ZERO,
-                    path: [(Scalar::ZERO, Scalar::ZERO); 256],
+                    path: [[Scalar::ZERO; 3]; 161],
                     root_hash: Scalar::ZERO,
                 },
             }
@@ -1391,7 +1397,7 @@ mod tests {
             let key_to_decompose = cs.advice_column();
             let range = cs.advice_column();
             let cmp = cs.advice_column();
-            let full_bit_decomposer = chips::FullBitDecomposerChip::configure(
+            let full_trit_decomposer = chips::FullTritDecomposerChip::configure(
                 cs,
                 constants,
                 key_to_decompose,
@@ -1399,7 +1405,7 @@ mod tests {
                 cmp,
             );
             let poseidon = chips::configure_poseidon(cs);
-            let chip = LookupChip::configure(cs, full_bit_decomposer, poseidon);
+            let chip = LookupChip::configure(cs, full_trit_decomposer, poseidon);
             LookupCircuitConfig {
                 root_hash,
                 key,
