@@ -59,27 +59,32 @@ impl FromScalar for u64 {
 trait Node<
     K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
     V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
+    const W: usize,
 >: Debug + Send + Sync + AsScalar + 'static
 {
     fn get(&self, key: K) -> &V;
-    fn lookup(&self, key: K) -> (&V, Vec<[Scalar; 3]>);
-    fn put(&self, key: K, value: V) -> Arc<dyn Node<K, V>>;
+    fn lookup(&self, key: K) -> (&V, Vec<[Scalar; W]>);
+    fn put(&self, key: K, value: V) -> Arc<dyn Node<K, V, W>>;
 }
 
 #[derive(Debug)]
 struct PhantomNodes<
     K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
     V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
+    const W: usize,
+    const H: usize,
 > {
-    nodes: [Arc<dyn Node<K, V>>; 162],
+    nodes: Vec<Arc<dyn Node<K, V, W>>>,
 }
 
 impl<
     K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
     V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
-> PhantomNodes<K, V>
+    const W: usize,
+    const H: usize,
+> PhantomNodes<K, V, W, H>
 {
-    fn get(&self, level: usize) -> Arc<dyn Node<K, V>> {
+    fn get(&self, level: usize) -> Arc<dyn Node<K, V, W>> {
         self.nodes[level].clone()
     }
 }
@@ -87,45 +92,64 @@ impl<
 impl<
     K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
     V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
-> Default for PhantomNodes<K, V>
+    const H: usize,
+> Default for PhantomNodes<K, V, 2, H>
 {
     fn default() -> Self {
         let mut nodes = vec![];
-        let mut node: Arc<dyn Node<K, V>> = Arc::new(Leaf::new(V::default()));
+        let mut node: Arc<dyn Node<K, V, 2>> = Arc::new(Leaf::new(V::default()));
         nodes.push(node.clone());
-        for level in 1..=161 {
+        for level in 1..=H {
+            node = Arc::new(InternalNode::new(level, [node.clone(), node.clone()]));
+            nodes.push(node.clone());
+        }
+        Self { nodes }
+    }
+}
+
+impl<
+    K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
+    V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
+    const H: usize,
+> Default for PhantomNodes<K, V, 3, H>
+{
+    fn default() -> Self {
+        let mut nodes = vec![];
+        let mut node: Arc<dyn Node<K, V, 3>> = Arc::new(Leaf::new(V::default()));
+        nodes.push(node.clone());
+        for level in 1..=H {
             node = Arc::new(InternalNode::new(
                 level,
                 [node.clone(), node.clone(), node.clone()],
             ));
             nodes.push(node.clone());
         }
-        Self {
-            nodes: nodes.try_into().unwrap(),
-        }
+        Self { nodes }
     }
 }
 
 #[derive(Debug, Default)]
 struct MonomorphicPhantomNodes {
-    map: Mutex<BTreeMap<TypeId, Arc<dyn Any + Send + Sync>>>,
+    map: Mutex<BTreeMap<(TypeId, usize, usize), Arc<dyn Any + Send + Sync>>>,
 }
 
 impl MonomorphicPhantomNodes {
     fn get<
         K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
         V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
+        const W: usize,
+        const H: usize,
     >(
         &self,
         level: usize,
-    ) -> Arc<dyn Node<K, V>> {
-        let id = TypeId::of::<(K, V)>();
+    ) -> Arc<dyn Node<K, V, W>> {
+        let id = (TypeId::of::<(K, V)>(), W, H);
         {
             let map = self.map.lock().unwrap();
             if let Some(nodes) = map.get(&id) {
                 return nodes
                     .clone()
-                    .downcast::<PhantomNodes<K, V>>()
+                    .downcast::<PhantomNodes<K, V, W, H>>()
                     .unwrap()
                     .get(level);
             }
@@ -136,7 +160,13 @@ impl MonomorphicPhantomNodes {
         //
         // NOTE: we'll be able to simplify this code when Rust provides a reentrant lock
         // implementation (see https://github.com/rust-lang/rust/issues/121440).
-        let nodes = Arc::new(PhantomNodes::<K, V>::default());
+        let nodes: Arc<dyn Any + Send + Sync> = if W == 2 {
+            Arc::new(PhantomNodes::<K, V, 2, H>::default())
+        } else if W == 3 {
+            Arc::new(PhantomNodes::<K, V, 3, H>::default())
+        } else {
+            unimplemented!()
+        };
         {
             let mut map = self.map.lock().unwrap();
             if !map.contains_key(&id) {
@@ -144,7 +174,7 @@ impl MonomorphicPhantomNodes {
             }
             map.get(&id).unwrap().clone()
         }
-        .downcast::<PhantomNodes<K, V>>()
+        .downcast::<PhantomNodes<K, V, W, H>>()
         .unwrap()
         .get(level)
     }
@@ -178,17 +208,18 @@ impl<
 impl<
     K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
     V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
-> Node<K, V> for Leaf<K, V>
+    const W: usize,
+> Node<K, V, W> for Leaf<K, V>
 {
     fn get(&self, _key: K) -> &V {
         &self.value
     }
 
-    fn lookup(&self, _key: K) -> (&V, Vec<[Scalar; 3]>) {
+    fn lookup(&self, _key: K) -> (&V, Vec<[Scalar; W]>) {
         (&self.value, vec![])
     }
 
-    fn put(&self, _key: K, value: V) -> Arc<dyn Node<K, V>> {
+    fn put(&self, _key: K, value: V) -> Arc<dyn Node<K, V, W>> {
         Arc::new(Self::new(value))
     }
 }
@@ -207,32 +238,81 @@ impl<
 struct InternalNode<
     K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
     V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
+    const W: usize,
 > {
     // TODO: convert `level` to a generic const argument when Rust supports generic const argument
     // expressions. See <https://github.com/rust-lang/rust/issues/76560>.
     level: usize,
-    children: [Arc<dyn Node<K, V>>; 3],
+    children: [Arc<dyn Node<K, V, W>>; W],
     hash: Scalar,
 }
 
 impl<
     K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
     V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
-> InternalNode<K, V>
+    const W: usize,
+> InternalNode<K, V, W>
 {
-    fn new(level: usize, children: [Arc<dyn Node<K, V>>; 3]) -> Self {
-        let hash = utils::poseidon_hash([
-            children[0].as_scalar(),
-            children[1].as_scalar(),
-            children[2].as_scalar(),
-        ]);
+    fn map_nodes<T>(
+        array: &[Arc<dyn Node<K, V, W>>; W],
+        mut f: impl FnMut(&Arc<dyn Node<K, V, W>>) -> T,
+    ) -> [T; W] {
+        std::array::from_fn(|i| f(&array[i]))
+    }
+
+    fn map_children<T>(&self, f: impl FnMut(&Arc<dyn Node<K, V, W>>) -> T) -> [T; W] {
+        Self::map_nodes(&self.children, f)
+    }
+
+    fn new(level: usize, children: [Arc<dyn Node<K, V, W>>; W]) -> Self {
+        let hash = utils::poseidon_hash::<W>(Self::map_nodes(&children, |child| child.as_scalar()));
         Self {
             level,
             children,
             hash,
         }
     }
+}
 
+impl<
+    K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
+    V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
+> InternalNode<K, V, 2>
+{
+    fn get_bit(&self, key: K) -> usize {
+        let count = Scalar::from(self.level as u64 - 1);
+        let bit = xits::and1(xits::shr(key.into(), count));
+        bit.to_repr()[0] as usize
+    }
+}
+
+impl<
+    K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
+    V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
+> Node<K, V, 2> for InternalNode<K, V, 2>
+{
+    fn get(&self, key: K) -> &V {
+        self.children[self.get_bit(key)].get(key)
+    }
+
+    fn lookup(&self, key: K) -> (&V, Vec<[Scalar; 2]>) {
+        let (value, mut path) = self.children[self.get_bit(key)].lookup(key);
+        path.push(self.map_children(|child| child.as_scalar()));
+        (value, path)
+    }
+
+    fn put(&self, key: K, value: V) -> Arc<dyn Node<K, V, 2>> {
+        let mut children = self.children.clone();
+        children[self.get_bit(key)] = children[self.get_bit(key)].put(key, value);
+        Arc::new(Self::new(self.level, children))
+    }
+}
+
+impl<
+    K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
+    V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
+> InternalNode<K, V, 3>
+{
     fn get_trit(&self, key: K) -> usize {
         let count = (self.level - 1) as u8;
         let trit = xits::mod3(xits::div_pow3(key.into(), count));
@@ -243,7 +323,7 @@ impl<
 impl<
     K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
     V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
-> Node<K, V> for InternalNode<K, V>
+> Node<K, V, 3> for InternalNode<K, V, 3>
 {
     fn get(&self, key: K) -> &V {
         self.children[self.get_trit(key)].get(key)
@@ -251,20 +331,12 @@ impl<
 
     fn lookup(&self, key: K) -> (&V, Vec<[Scalar; 3]>) {
         let (value, mut path) = self.children[self.get_trit(key)].lookup(key);
-        path.push([
-            self.children[0].as_scalar(),
-            self.children[1].as_scalar(),
-            self.children[2].as_scalar(),
-        ]);
+        path.push(self.map_children(|child| child.as_scalar()));
         (value, path)
     }
 
-    fn put(&self, key: K, value: V) -> Arc<dyn Node<K, V>> {
-        let mut children = [
-            self.children[0].clone(),
-            self.children[1].clone(),
-            self.children[2].clone(),
-        ];
+    fn put(&self, key: K, value: V) -> Arc<dyn Node<K, V, 3>> {
+        let mut children = self.children.clone();
         children[self.get_trit(key)] = children[self.get_trit(key)].put(key, value);
         Arc::new(Self::new(self.level, children))
     }
@@ -273,7 +345,8 @@ impl<
 impl<
     K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
     V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
-> AsScalar for InternalNode<K, V>
+    const W: usize,
+> AsScalar for InternalNode<K, V, W>
 {
     fn as_scalar(&self) -> Scalar {
         self.hash
@@ -281,14 +354,23 @@ impl<
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MerkleProof<K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static> {
+pub struct MerkleProof<
+    K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
+    const W: usize,
+    const H: usize,
+> {
     key: K,
     value_as_scalar: Scalar,
-    path: [[Scalar; 3]; 161],
+    path: [[Scalar; W]; H],
     root_hash: Scalar,
 }
 
-impl<K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static> MerkleProof<K> {
+impl<
+    K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
+    const W: usize,
+    const H: usize,
+> MerkleProof<K, W, H>
+{
     pub fn key(&self) -> K {
         self.key
     }
@@ -297,14 +379,56 @@ impl<K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static> Merkle
         self.value_as_scalar
     }
 
-    pub fn path(&self) -> &[[Scalar; 3]; 161] {
+    pub fn path(&self) -> &[[Scalar; W]; H] {
         &self.path
     }
 
     pub fn root_hash(&self) -> Scalar {
         self.root_hash
     }
+}
 
+impl<K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static, const H: usize>
+    MerkleProof<K, 2, H>
+{
+    pub fn verify(&self, root_hash: Scalar) -> Result<()> {
+        if root_hash != self.root_hash {
+            return Err(anyhow!(
+                "root hash mismatch: got {:#x}, want {:#x}",
+                utils::pallas_scalar_to_u256(self.root_hash),
+                utils::pallas_scalar_to_u256(root_hash)
+            ));
+        }
+        let mut key = self.key.into();
+        let mut hash = self.value_as_scalar;
+        for children in self.path {
+            let bit = xits::and1(key);
+            let bit = bit.to_repr()[0] as usize;
+            if hash != children[bit] {
+                return Err(anyhow!(
+                    "hash mismatch: got {:#x} or {:#x}, want {:#x}",
+                    utils::pallas_scalar_to_u256(children[0]),
+                    utils::pallas_scalar_to_u256(children[1]),
+                    utils::pallas_scalar_to_u256(hash),
+                ));
+            }
+            key = xits::shr1(key);
+            hash = utils::poseidon_hash(children);
+        }
+        if hash != self.root_hash {
+            return Err(anyhow!(
+                "final hash mismatch: got {:#x}, want {:#x}",
+                utils::pallas_scalar_to_u256(self.root_hash),
+                utils::pallas_scalar_to_u256(hash),
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl<K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static, const H: usize>
+    MerkleProof<K, 3, H>
+{
     pub fn verify(&self, root_hash: Scalar) -> Result<()> {
         if root_hash != self.root_hash {
             return Err(anyhow!(
@@ -341,7 +465,12 @@ impl<K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static> Merkle
     }
 }
 
-impl<K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static> MerkleProof<K> {
+impl<
+    K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
+    const W: usize,
+    const H: usize,
+> MerkleProof<K, W, H>
+{
     /// Encodes this proof into a `MerkleProof` protobuf. Note that the block descriptor must be
     /// provided by the caller.
     pub fn encode(
@@ -377,7 +506,7 @@ impl<K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static> Merkle
         }
         let value_as_scalar = proto.value.as_ref().unwrap().to_msg::<dotakon::Bytes32>()?;
         let value_as_scalar = proto::pallas_scalar_from_bytes32(&value_as_scalar)?;
-        let path: [[Scalar; 3]; 161] = proto
+        let path: [[Scalar; W]; H] = proto
             .path
             .iter()
             .map(|node| {
@@ -388,20 +517,22 @@ impl<K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static> Merkle
                     .try_into()
                     .map_err(|vec: Vec<Scalar>| {
                         anyhow!(
-                            "invalid Merkle proof: found node with {} child hashes (expected 3)",
-                            vec.len()
+                            "invalid Merkle proof: found node with {} child hashes (expected {})",
+                            vec.len(),
+                            W
                         )
                     })
             })
             .collect::<Result<Vec<_>>>()?
             .try_into()
-            .map_err(|vec: Vec<[Scalar; 3]>| {
+            .map_err(|vec: Vec<[Scalar; W]>| {
                 anyhow!(
-                    "invalid Merkle proof: incorrect lookup path length (got {}, want 161)",
-                    vec.len()
+                    "invalid Merkle proof: incorrect lookup path length (got {}, want {})",
+                    vec.len(),
+                    H
                 )
             })?;
-        let root_hash = utils::poseidon_hash(path[160]);
+        let root_hash = utils::poseidon_hash(path[H - 1]);
         Ok(Self {
             key,
             value_as_scalar,
@@ -409,7 +540,27 @@ impl<K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static> Merkle
             root_hash,
         })
     }
+}
 
+impl<K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static, const H: usize>
+    MerkleProof<K, 2, H>
+{
+    /// Like `decode` but also validates the decoded proof against the provided root hash.
+    ///
+    /// Note that the root hash should be the same as one of the root hashes specified in the block
+    /// descriptor, depending on what storage component this proof is relative to. For example, if
+    /// the proof was generated from an account balance lookup the root hash must be the same as the
+    /// one encoded in `block_descriptor.account_balances_root_hash`.
+    pub fn decode_and_verify(proto: &dotakon::MerkleProof, root_hash: Scalar) -> Result<Self> {
+        let proof = Self::decode(proto)?;
+        proof.verify(root_hash)?;
+        Ok(proof)
+    }
+}
+
+impl<K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static, const H: usize>
+    MerkleProof<K, 3, H>
+{
     /// Like `decode` but also validates the decoded proof against the provided root hash.
     ///
     /// Note that the root hash should be the same as one of the root hashes specified in the block
@@ -424,7 +575,146 @@ impl<K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static> Merkle
 }
 
 #[derive(Debug, Clone)]
-pub struct LookupChipConfig {
+pub struct BinaryLookupChipConfig {
+    key: plonk::Column<plonk::Advice>,
+    left: plonk::Column<plonk::Advice>,
+    right: plonk::Column<plonk::Advice>,
+    hash: plonk::Column<plonk::Advice>,
+    full_bit_decomposer: chips::FullBitDecomposerConfig,
+    poseidon: chips::PoseidonConfig,
+    step_selector: plonk::Selector,
+}
+
+#[derive(Debug)]
+pub struct BinaryLookupChip<const H: usize> {
+    config: BinaryLookupChipConfig,
+}
+
+impl<const H: usize> BinaryLookupChip<H> {
+    pub fn configure(
+        cs: &mut plonk::ConstraintSystem<Scalar>,
+        full_bit_decomposer: chips::FullBitDecomposerConfig,
+        poseidon: chips::PoseidonConfig,
+    ) -> BinaryLookupChipConfig {
+        let key = cs.advice_column();
+        cs.enable_equality(key);
+        let left = cs.advice_column();
+        cs.enable_equality(left);
+        let right = cs.advice_column();
+        cs.enable_equality(right);
+        let hash = cs.advice_column();
+        cs.enable_equality(hash);
+        let step_selector = cs.selector();
+        cs.create_gate("step", |cells| {
+            let selector = cells.query_selector(step_selector);
+            let bit = cells.query_advice(key, poly::Rotation::cur());
+            let left = cells.query_advice(left, poly::Rotation::cur());
+            let right = cells.query_advice(right, poly::Rotation::cur());
+            let hash = cells.query_advice(hash, poly::Rotation::cur());
+            let not = plonk::Expression::Constant(1.into()) - bit.clone();
+            vec![selector * (bit * (hash.clone() - right) + not * (hash - left))]
+        });
+        BinaryLookupChipConfig {
+            key,
+            left,
+            right,
+            hash,
+            full_bit_decomposer,
+            poseidon,
+            step_selector,
+        }
+    }
+
+    pub fn construct(config: BinaryLookupChipConfig) -> Self {
+        Self { config }
+    }
+
+    pub fn assign<K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static>(
+        &self,
+        layouter: &mut impl circuit::Layouter<Scalar>,
+        root_hash: chips::AssignedCell,
+        key: chips::AssignedCell,
+        merkle_proof: &MerkleProof<K, 2, H>,
+    ) -> Result<chips::AssignedCell, plonk::Error> {
+        let bit_decomposer =
+            chips::FullBitDecomposerChip::construct(self.config.full_bit_decomposer.clone());
+        let key_bits = bit_decomposer.assign(layouter, key)?;
+        let value = layouter.assign_region(
+            || "load_value",
+            |mut region| {
+                region.assign_advice(
+                    || "load_value",
+                    self.config.hash,
+                    0,
+                    || circuit::Value::known(merkle_proof.value_as_scalar()),
+                )
+            },
+        )?;
+        let poseidon = chips::PoseidonChip::<2>::construct(self.config.poseidon.clone());
+        let mut hash = value.clone();
+        let path = merkle_proof.path();
+        for i in 0..H {
+            let (left, right) = layouter.assign_region(
+                || "step",
+                |mut region| {
+                    self.config.step_selector.enable(&mut region, 0)?;
+                    let key_bit = region.assign_advice(
+                        || format!("key[{}]", i),
+                        self.config.key,
+                        0,
+                        || key_bits[i].value().cloned(),
+                    )?;
+                    region.constrain_equal(key_bit.cell(), key_bits[i].cell())?;
+                    let left = region.assign_advice(
+                        || format!("left[{}]", i),
+                        self.config.left,
+                        0,
+                        || circuit::Value::known(path[i][0]),
+                    )?;
+                    let right = region.assign_advice(
+                        || format!("right[{}]", i),
+                        self.config.right,
+                        0,
+                        || circuit::Value::known(path[i][1]),
+                    )?;
+                    let hash2 = region.assign_advice(
+                        || format!("load_hash[{}]", i),
+                        self.config.hash,
+                        0,
+                        || hash.value().cloned(),
+                    )?;
+                    region.constrain_equal(hash.cell(), hash2.cell())?;
+                    Ok((left, right))
+                },
+            )?;
+            hash = poseidon.assign(
+                &mut layouter.namespace(|| format!("hash[{}]", i)),
+                [left, right],
+            )?;
+        }
+        layouter.assign_region(
+            || "check_root",
+            |mut region| region.constrain_equal(hash.cell(), root_hash.cell()),
+        )?;
+        Ok(value)
+    }
+}
+
+impl<const H: usize> circuit::Chip<Scalar> for BinaryLookupChip<H> {
+    type Config = BinaryLookupChipConfig;
+    type Loaded = ();
+
+    fn config(&self) -> &Self::Config {
+        &self.config
+    }
+
+    fn loaded(&self) -> &Self::Loaded {
+        &()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TernaryLookupChipConfig {
     key: plonk::Column<plonk::Advice>,
     children: [plonk::Column<plonk::Advice>; 3],
     hash: plonk::Column<plonk::Advice>,
@@ -434,16 +724,16 @@ pub struct LookupChipConfig {
 }
 
 #[derive(Debug)]
-pub struct LookupChip {
-    config: LookupChipConfig,
+pub struct TernaryLookupChip<const H: usize> {
+    config: TernaryLookupChipConfig,
 }
 
-impl LookupChip {
+impl<const H: usize> TernaryLookupChip<H> {
     pub fn configure(
         cs: &mut plonk::ConstraintSystem<Scalar>,
         full_trit_decomposer: chips::FullTritDecomposerConfig,
         poseidon: chips::PoseidonConfig,
-    ) -> LookupChipConfig {
+    ) -> TernaryLookupChipConfig {
         let key = cs.advice_column();
         cs.enable_equality(key);
         let children = std::array::from_fn(|_| {
@@ -475,7 +765,7 @@ impl LookupChip {
                             * (hash - child2)),
             ]
         });
-        LookupChipConfig {
+        TernaryLookupChipConfig {
             key,
             children,
             hash,
@@ -485,7 +775,7 @@ impl LookupChip {
         }
     }
 
-    pub fn construct(config: LookupChipConfig) -> Self {
+    pub fn construct(config: TernaryLookupChipConfig) -> Self {
         Self { config }
     }
 
@@ -494,7 +784,7 @@ impl LookupChip {
         layouter: &mut impl circuit::Layouter<Scalar>,
         root_hash: chips::AssignedCell,
         key: chips::AssignedCell,
-        merkle_proof: &MerkleProof<K>,
+        merkle_proof: &MerkleProof<K, 3, H>,
     ) -> Result<chips::AssignedCell, plonk::Error> {
         let trit_decomposer =
             chips::FullTritDecomposerChip::construct(self.config.full_trit_decomposer.clone());
@@ -504,7 +794,7 @@ impl LookupChip {
             |mut region| {
                 region.assign_advice(
                     || "load_value",
-                    self.config.children[0],
+                    self.config.hash,
                     0,
                     || circuit::Value::known(merkle_proof.value_as_scalar()),
                 )
@@ -513,7 +803,7 @@ impl LookupChip {
         let poseidon = chips::PoseidonChip::<3>::construct(self.config.poseidon.clone());
         let mut hash = value.clone();
         let path = merkle_proof.path();
-        for i in 0..161 {
+        for i in 0..H {
             let children = layouter.assign_region(
                 || "step",
                 |mut region| {
@@ -557,8 +847,8 @@ impl LookupChip {
     }
 }
 
-impl circuit::Chip<Scalar> for LookupChip {
-    type Config = LookupChipConfig;
+impl<const H: usize> circuit::Chip<Scalar> for TernaryLookupChip<H> {
+    type Config = TernaryLookupChipConfig;
     type Loaded = ();
 
     fn config(&self) -> &Self::Config {
@@ -574,14 +864,18 @@ impl circuit::Chip<Scalar> for LookupChip {
 pub struct MerkleTreeVersion<
     K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
     V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
+    const W: usize,
+    const H: usize,
 > {
-    root: Arc<dyn Node<K, V>>,
+    root: Arc<dyn Node<K, V, W>>,
 }
 
 impl<
     K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
     V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
-> MerkleTreeVersion<K, V>
+    const W: usize,
+    const H: usize,
+> MerkleTreeVersion<K, V, W, H>
 {
     pub fn root_hash(&self) -> Scalar {
         self.root.as_scalar()
@@ -591,7 +885,7 @@ impl<
         self.root.get(key)
     }
 
-    pub fn get_proof(&self, key: K) -> MerkleProof<K> {
+    pub fn get_proof(&self, key: K) -> MerkleProof<K, W, H> {
         let (value, path) = self.root.lookup(key);
         MerkleProof {
             key,
@@ -611,11 +905,13 @@ impl<
 impl<
     K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
     V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
-> Default for MerkleTreeVersion<K, V>
+    const W: usize,
+    const H: usize,
+> Default for MerkleTreeVersion<K, V, W, H>
 {
     fn default() -> Self {
         Self {
-            root: PHANTOM_NODES.get(161),
+            root: PHANTOM_NODES.get::<K, V, W, H>(H),
         }
     }
 }
@@ -623,7 +919,9 @@ impl<
 impl<
     K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
     V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
-> AsScalar for MerkleTreeVersion<K, V>
+    const W: usize,
+    const H: usize,
+> AsScalar for MerkleTreeVersion<K, V, W, H>
 {
     fn as_scalar(&self) -> Scalar {
         self.root_hash()
@@ -634,16 +932,20 @@ impl<
 pub struct MerkleTree<
     K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
     V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
+    const W: usize,
+    const H: usize,
 > {
-    versions: BTreeMap<u64, MerkleTreeVersion<K, V>>,
+    versions: BTreeMap<u64, MerkleTreeVersion<K, V, W, H>>,
 }
 
 impl<
     K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
     V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
-> MerkleTree<K, V>
+    const W: usize,
+    const H: usize,
+> MerkleTree<K, V, W, H>
 {
-    pub fn get_version(&self, version: u64) -> &MerkleTreeVersion<K, V> {
+    pub fn get_version(&self, version: u64) -> &MerkleTreeVersion<K, V, W, H> {
         let (_, version) = self.versions.range(0..=version).next_back().unwrap();
         version
     }
@@ -658,7 +960,7 @@ impl<
         version.get(key)
     }
 
-    pub fn get_proof(&self, key: K, version: u64) -> MerkleProof<K> {
+    pub fn get_proof(&self, key: K, version: u64) -> MerkleProof<K, W, H> {
         let (_, version) = self.versions.range(0..=version).next_back().unwrap();
         version.get_proof(key)
     }
@@ -675,7 +977,9 @@ impl<
 impl<
     K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
     V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
-> Default for MerkleTree<K, V>
+    const W: usize,
+    const H: usize,
+> Default for MerkleTree<K, V, W, H>
 {
     fn default() -> Self {
         Self {
@@ -684,11 +988,11 @@ impl<
     }
 }
 
-pub type AccountBalanceTree = MerkleTree<Scalar, Scalar>;
-pub type AccountBalanceProof = MerkleProof<Scalar>;
+pub type AccountBalanceTree = MerkleTree<Scalar, Scalar, 3, 161>;
+pub type AccountBalanceProof = MerkleProof<Scalar, 3, 161>;
 
-pub type ProgramStorageTree = MerkleTree<Scalar, MerkleTreeVersion<u64, u64>>;
-pub type ProgramStorageProof = MerkleProof<u64>;
+pub type ProgramStorageTree = MerkleTree<Scalar, MerkleTreeVersion<u64, u64, 2, 64>, 3, 161>;
+pub type ProgramStorageProof = MerkleProof<u64, 2, 64>;
 
 #[cfg(test)]
 mod tests {
@@ -1337,49 +1641,50 @@ mod tests {
     }
 
     #[derive(Debug, Clone)]
-    struct LookupCircuitConfig {
+    struct BinaryLookupCircuitConfig {
         root_hash: plonk::Column<plonk::Instance>,
         key: plonk::Column<plonk::Instance>,
         value: plonk::Column<plonk::Instance>,
-        chip: LookupChipConfig,
+        chip: BinaryLookupChipConfig,
     }
 
     #[derive(Debug)]
-    struct LookupCircuit {
-        merkle_proof: MerkleProof<Scalar>,
+    struct BinaryLookupCircuit<const H: usize> {
+        merkle_proof: MerkleProof<Scalar, 2, H>,
     }
 
-    impl LookupCircuit {
+    impl<const H: usize> BinaryLookupCircuit<H> {
         fn verify(
-            tree: &MerkleTreeVersion<Scalar, Scalar>,
+            k: u32,
+            tree: &MerkleTreeVersion<Scalar, Scalar, 2, H>,
             key: Scalar,
             value: Scalar,
         ) -> Result<()> {
             let merkle_proof = tree.get_proof(key);
-            let circuit = LookupCircuit { merkle_proof };
+            let circuit = BinaryLookupCircuit { merkle_proof };
             utils::test::verify_circuit(
-                14,
+                k,
                 &circuit,
                 vec![vec![tree.root_hash()], vec![key], vec![value]],
             )
         }
     }
 
-    impl Default for LookupCircuit {
+    impl<const H: usize> Default for BinaryLookupCircuit<H> {
         fn default() -> Self {
             Self {
                 merkle_proof: MerkleProof {
                     key: Scalar::ZERO,
                     value_as_scalar: Scalar::ZERO,
-                    path: [[Scalar::ZERO; 3]; 161],
+                    path: [[Scalar::ZERO; 2]; H],
                     root_hash: Scalar::ZERO,
                 },
             }
         }
     }
 
-    impl plonk::Circuit<Scalar> for LookupCircuit {
-        type Config = LookupCircuitConfig;
+    impl<const H: usize> plonk::Circuit<Scalar> for BinaryLookupCircuit<H> {
+        type Config = BinaryLookupCircuitConfig;
         type FloorPlanner = circuit::floor_planner::V1;
 
         fn without_witnesses(&self) -> Self {
@@ -1397,7 +1702,7 @@ mod tests {
             let key_to_decompose = cs.advice_column();
             let range = cs.advice_column();
             let cmp = cs.advice_column();
-            let full_trit_decomposer = chips::FullTritDecomposerChip::configure(
+            let full_bit_decomposer = chips::FullBitDecomposerChip::configure(
                 cs,
                 constants,
                 key_to_decompose,
@@ -1405,8 +1710,8 @@ mod tests {
                 cmp,
             );
             let poseidon = chips::configure_poseidon(cs);
-            let chip = LookupChip::configure(cs, full_trit_decomposer, poseidon);
-            LookupCircuitConfig {
+            let chip = BinaryLookupChip::<H>::configure(cs, full_bit_decomposer, poseidon);
+            BinaryLookupCircuitConfig {
                 root_hash,
                 key,
                 value,
@@ -1439,7 +1744,7 @@ mod tests {
                     Ok((root_hash, key))
                 },
             )?;
-            let chip = LookupChip::construct(config.chip.clone());
+            let chip = BinaryLookupChip::<H>::construct(config.chip.clone());
             let value = chip.assign(
                 &mut layouter.namespace(|| "lookup"),
                 root_hash,
@@ -1464,23 +1769,282 @@ mod tests {
     }
 
     #[test]
-    fn test_empty_tree_zk_lookup() {
-        let tree = AccountBalanceTree::default();
-        let key = test_scalar1();
-        assert!(LookupCircuit::verify(tree.get_version(0), key, Scalar::ZERO).is_ok());
-        assert!(LookupCircuit::verify(tree.get_version(0), key, test_scalar2()).is_err());
+    fn test_binary_tree_zk_lookup_one_step_empty() {
+        let tree = MerkleTree::<Scalar, Scalar, 2, 1>::default();
+        let key = Scalar::from(1);
+        assert!(BinaryLookupCircuit::verify(10, tree.get_version(0), key, Scalar::ZERO).is_ok());
+        assert!(BinaryLookupCircuit::verify(10, tree.get_version(0), key, test_scalar2()).is_err());
     }
 
     #[test]
-    fn test_zk_lookup() {
-        let mut tree = AccountBalanceTree::default();
+    fn test_binary_tree_zk_lookup_one_step() {
+        let mut tree = MerkleTree::<Scalar, Scalar, 2, 1>::default();
+        let key1 = Scalar::from(0);
+        let key2 = Scalar::from(1);
+        let value = test_scalar3();
+        tree.put(key1, value, 0);
+        assert!(BinaryLookupCircuit::verify(10, tree.get_version(0), key1, Scalar::ZERO).is_err());
+        assert!(BinaryLookupCircuit::verify(10, tree.get_version(0), key1, value).is_ok());
+        assert!(BinaryLookupCircuit::verify(10, tree.get_version(0), key2, Scalar::ZERO).is_ok());
+        assert!(BinaryLookupCircuit::verify(10, tree.get_version(0), key2, value).is_err());
+    }
+
+    #[test]
+    fn test_binary_tree_zk_lookup_two_steps_empty() {
+        let tree = MerkleTree::<Scalar, Scalar, 2, 2>::default();
+        let key = Scalar::from(2);
+        assert!(BinaryLookupCircuit::verify(10, tree.get_version(0), key, Scalar::ZERO).is_ok());
+        assert!(BinaryLookupCircuit::verify(10, tree.get_version(0), key, test_scalar2()).is_err());
+    }
+
+    #[test]
+    fn test_binary_tree_zk_lookup_two_steps() {
+        let mut tree = MerkleTree::<Scalar, Scalar, 2, 2>::default();
+        let key1 = Scalar::from(3);
+        let key2 = Scalar::from(2);
+        let value = test_scalar3();
+        tree.put(key1, value, 0);
+        assert!(BinaryLookupCircuit::verify(10, tree.get_version(0), key1, Scalar::ZERO).is_err());
+        assert!(BinaryLookupCircuit::verify(10, tree.get_version(0), key1, value).is_ok());
+        assert!(BinaryLookupCircuit::verify(10, tree.get_version(0), key2, Scalar::ZERO).is_ok());
+        assert!(BinaryLookupCircuit::verify(10, tree.get_version(0), key2, value).is_err());
+    }
+
+    #[test]
+    fn test_binary_tree_zk_lookup_three_steps_empty() {
+        let tree = MerkleTree::<Scalar, Scalar, 2, 3>::default();
+        let key = Scalar::from(5);
+        assert!(BinaryLookupCircuit::verify(10, tree.get_version(0), key, Scalar::ZERO).is_ok());
+        assert!(BinaryLookupCircuit::verify(10, tree.get_version(0), key, test_scalar2()).is_err());
+    }
+
+    #[test]
+    fn test_binary_tree_zk_lookup_three_steps() {
+        let mut tree = MerkleTree::<Scalar, Scalar, 2, 3>::default();
+        let key1 = Scalar::from(6);
+        let key2 = Scalar::from(5);
+        let value = test_scalar3();
+        tree.put(key1, value, 0);
+        assert!(BinaryLookupCircuit::verify(10, tree.get_version(0), key1, Scalar::ZERO).is_err());
+        assert!(BinaryLookupCircuit::verify(10, tree.get_version(0), key1, value).is_ok());
+        assert!(BinaryLookupCircuit::verify(10, tree.get_version(0), key2, Scalar::ZERO).is_ok());
+        assert!(BinaryLookupCircuit::verify(10, tree.get_version(0), key2, value).is_err());
+    }
+
+    #[test]
+    fn test_full_binary_zk_lookup() {
+        let mut tree = MerkleTree::<Scalar, Scalar, 2, 256>::default();
         let key1 = test_scalar1();
         let key2 = test_scalar2();
         let value = test_scalar3();
         tree.put(key1, value, 0);
-        assert!(LookupCircuit::verify(tree.get_version(0), key1, Scalar::ZERO).is_err());
-        assert!(LookupCircuit::verify(tree.get_version(0), key1, value).is_ok());
-        assert!(LookupCircuit::verify(tree.get_version(0), key2, Scalar::ZERO).is_ok());
-        assert!(LookupCircuit::verify(tree.get_version(0), key2, value).is_err());
+        assert!(BinaryLookupCircuit::verify(14, tree.get_version(0), key1, Scalar::ZERO).is_err());
+        assert!(BinaryLookupCircuit::verify(14, tree.get_version(0), key1, value).is_ok());
+        assert!(BinaryLookupCircuit::verify(14, tree.get_version(0), key2, Scalar::ZERO).is_ok());
+        assert!(BinaryLookupCircuit::verify(14, tree.get_version(0), key2, value).is_err());
+    }
+
+    #[derive(Debug, Clone)]
+    struct TernaryLookupCircuitConfig {
+        root_hash: plonk::Column<plonk::Instance>,
+        key: plonk::Column<plonk::Instance>,
+        value: plonk::Column<plonk::Instance>,
+        chip: TernaryLookupChipConfig,
+    }
+
+    #[derive(Debug)]
+    struct TernaryLookupCircuit<const H: usize> {
+        merkle_proof: MerkleProof<Scalar, 3, H>,
+    }
+
+    impl<const H: usize> TernaryLookupCircuit<H> {
+        fn verify(
+            k: u32,
+            tree: &MerkleTreeVersion<Scalar, Scalar, 3, H>,
+            key: Scalar,
+            value: Scalar,
+        ) -> Result<()> {
+            let merkle_proof = tree.get_proof(key);
+            let circuit = TernaryLookupCircuit { merkle_proof };
+            utils::test::verify_circuit(
+                k,
+                &circuit,
+                vec![vec![tree.root_hash()], vec![key], vec![value]],
+            )
+        }
+    }
+
+    impl<const H: usize> Default for TernaryLookupCircuit<H> {
+        fn default() -> Self {
+            Self {
+                merkle_proof: MerkleProof {
+                    key: Scalar::ZERO,
+                    value_as_scalar: Scalar::ZERO,
+                    path: [[Scalar::ZERO; 3]; H],
+                    root_hash: Scalar::ZERO,
+                },
+            }
+        }
+    }
+
+    impl<const H: usize> plonk::Circuit<Scalar> for TernaryLookupCircuit<H> {
+        type Config = TernaryLookupCircuitConfig;
+        type FloorPlanner = circuit::floor_planner::V1;
+
+        fn without_witnesses(&self) -> Self {
+            Self::default()
+        }
+
+        fn configure(cs: &mut plonk::ConstraintSystem<Scalar>) -> Self::Config {
+            let root_hash = cs.instance_column();
+            cs.enable_equality(root_hash);
+            let key = cs.instance_column();
+            cs.enable_equality(key);
+            let value = cs.instance_column();
+            cs.enable_equality(value);
+            let constants = cs.fixed_column();
+            let key_to_decompose = cs.advice_column();
+            let range = cs.advice_column();
+            let cmp = cs.advice_column();
+            let full_trit_decomposer = chips::FullTritDecomposerChip::configure(
+                cs,
+                constants,
+                key_to_decompose,
+                range,
+                cmp,
+            );
+            let poseidon = chips::configure_poseidon(cs);
+            let chip = TernaryLookupChip::<H>::configure(cs, full_trit_decomposer, poseidon);
+            TernaryLookupCircuitConfig {
+                root_hash,
+                key,
+                value,
+                chip,
+            }
+        }
+
+        fn synthesize(
+            &self,
+            config: Self::Config,
+            mut layouter: impl circuit::Layouter<Scalar>,
+        ) -> Result<(), plonk::Error> {
+            let (root_hash, key) = layouter.assign_region(
+                || "load",
+                |mut region| {
+                    let root_hash = region.assign_advice_from_instance(
+                        || "load_root_hash",
+                        config.root_hash,
+                        0,
+                        config.chip.hash,
+                        0,
+                    )?;
+                    let key = region.assign_advice_from_instance(
+                        || "load_key",
+                        config.key,
+                        0,
+                        config.chip.key,
+                        0,
+                    )?;
+                    Ok((root_hash, key))
+                },
+            )?;
+            let chip = TernaryLookupChip::<H>::construct(config.chip.clone());
+            let value = chip.assign(
+                &mut layouter.namespace(|| "lookup"),
+                root_hash,
+                key,
+                &self.merkle_proof,
+            )?;
+            layouter.assign_region(
+                || "check_value",
+                |mut region| {
+                    let expected = region.assign_advice_from_instance(
+                        || "load_value",
+                        config.value,
+                        0,
+                        config.chip.hash,
+                        0,
+                    )?;
+                    region.constrain_equal(value.cell(), expected.cell())
+                },
+            )?;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_ternary_tree_zk_lookup_one_step_empty() {
+        let tree = MerkleTree::<Scalar, Scalar, 3, 1>::default();
+        let key = Scalar::from(1);
+        assert!(TernaryLookupCircuit::verify(9, tree.get_version(0), key, Scalar::ZERO).is_ok());
+        assert!(TernaryLookupCircuit::verify(9, tree.get_version(0), key, test_scalar2()).is_err());
+    }
+
+    #[test]
+    fn test_ternary_tree_zk_lookup_one_step() {
+        let mut tree = MerkleTree::<Scalar, Scalar, 3, 1>::default();
+        let key1 = Scalar::from(2);
+        let key2 = Scalar::from(0);
+        let value = test_scalar3();
+        tree.put(key1, value, 0);
+        assert!(TernaryLookupCircuit::verify(9, tree.get_version(0), key1, Scalar::ZERO).is_err());
+        assert!(TernaryLookupCircuit::verify(9, tree.get_version(0), key1, value).is_ok());
+        assert!(TernaryLookupCircuit::verify(9, tree.get_version(0), key2, Scalar::ZERO).is_ok());
+        assert!(TernaryLookupCircuit::verify(9, tree.get_version(0), key2, value).is_err());
+    }
+
+    #[test]
+    fn test_ternary_tree_zk_lookup_two_steps_empty() {
+        let tree = MerkleTree::<Scalar, Scalar, 3, 2>::default();
+        let key = Scalar::from(7);
+        assert!(TernaryLookupCircuit::verify(9, tree.get_version(0), key, Scalar::ZERO).is_ok());
+        assert!(TernaryLookupCircuit::verify(9, tree.get_version(0), key, test_scalar2()).is_err());
+    }
+
+    #[test]
+    fn test_ternary_tree_zk_lookup_two_steps() {
+        let mut tree = MerkleTree::<Scalar, Scalar, 3, 2>::default();
+        let key1 = Scalar::from(5);
+        let key2 = Scalar::from(7);
+        let value = test_scalar3();
+        tree.put(key1, value, 0);
+        assert!(TernaryLookupCircuit::verify(9, tree.get_version(0), key1, Scalar::ZERO).is_err());
+        assert!(TernaryLookupCircuit::verify(9, tree.get_version(0), key1, value).is_ok());
+        assert!(TernaryLookupCircuit::verify(9, tree.get_version(0), key2, Scalar::ZERO).is_ok());
+        assert!(TernaryLookupCircuit::verify(9, tree.get_version(0), key2, value).is_err());
+    }
+
+    #[test]
+    fn test_ternary_tree_zk_lookup_three_steps_empty() {
+        let tree = MerkleTree::<Scalar, Scalar, 3, 3>::default();
+        let key = Scalar::from(21);
+        assert!(TernaryLookupCircuit::verify(9, tree.get_version(0), key, Scalar::ZERO).is_ok());
+        assert!(TernaryLookupCircuit::verify(9, tree.get_version(0), key, test_scalar2()).is_err());
+    }
+
+    #[test]
+    fn test_ternary_tree_zk_lookup_three_steps() {
+        let mut tree = MerkleTree::<Scalar, Scalar, 3, 3>::default();
+        let key1 = Scalar::from(15);
+        let key2 = Scalar::from(21);
+        let value = test_scalar3();
+        tree.put(key1, value, 0);
+        assert!(TernaryLookupCircuit::verify(9, tree.get_version(0), key1, Scalar::ZERO).is_err());
+        assert!(TernaryLookupCircuit::verify(9, tree.get_version(0), key1, value).is_ok());
+        assert!(TernaryLookupCircuit::verify(9, tree.get_version(0), key2, Scalar::ZERO).is_ok());
+        assert!(TernaryLookupCircuit::verify(9, tree.get_version(0), key2, value).is_err());
+    }
+
+    #[test]
+    fn test_full_ternary_zk_lookup() {
+        let mut tree = MerkleTree::<Scalar, Scalar, 3, 161>::default();
+        let key1 = test_scalar1();
+        let key2 = test_scalar2();
+        let value = test_scalar3();
+        tree.put(key1, value, 0);
+        assert!(TernaryLookupCircuit::verify(14, tree.get_version(0), key1, Scalar::ZERO).is_err());
+        assert!(TernaryLookupCircuit::verify(14, tree.get_version(0), key1, value).is_ok());
+        assert!(TernaryLookupCircuit::verify(14, tree.get_version(0), key2, Scalar::ZERO).is_ok());
+        assert!(TernaryLookupCircuit::verify(14, tree.get_version(0), key2, value).is_err());
     }
 }

@@ -523,7 +523,7 @@ mod tests {
 
     fn genesis_block_hash() -> Scalar {
         utils::u256_to_pallas_scalar(
-            "0x0eddc2fada9f04438bf248362bef6c2a68b2e65810cc03bf601a640846e083a0"
+            "0x1a888b189a6e85bebbc239b112e4884d52893e3f4f291e6f9e88a06138fd3197"
                 .parse()
                 .unwrap(),
         )
@@ -613,7 +613,7 @@ mod tests {
         assert_eq!(
             block.program_storage_root_hash(),
             utils::parse_pallas_scalar(
-                "0x0be3ca4b0a4448535236e535ac540862bf480d41edede21f27c98915cf51e0ed"
+                "0x297401934d5cc4d84e639092ccb6f336faae9fc1c54cd4e23ef2561f8c63f683"
             )
         );
         assert_eq!(BlockInfo::decode(&block.encode()).unwrap(), block);

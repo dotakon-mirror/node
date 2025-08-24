@@ -14,7 +14,7 @@ futures = "0.3.31"
 group = "0.13.0"
 halo2_gadgets = "0.3.1"
 halo2_poseidon = "0.1.0"
-halo2_proofs = "0.3.1"
+halo2_proofs = { version = "0.3.1", features = ["batch", "multicore"] }
 hyper = { version = "1.6.0", features = ["full"] }
 memmap2 = "0.9.7"
 oid-registry = "0.8.1"
