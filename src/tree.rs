@@ -877,6 +877,14 @@ impl<
     const H: usize,
 > MerkleTreeVersion<K, V, W, H>
 {
+    pub fn from<const N: usize>(entries: [(K, V); N]) -> Self {
+        let mut tree = Self::default();
+        for (key, value) in entries {
+            tree = tree.put(key, value);
+        }
+        tree
+    }
+
     pub fn root_hash(&self) -> Scalar {
         self.root.as_scalar()
     }
@@ -945,6 +953,12 @@ impl<
     const H: usize,
 > MerkleTree<K, V, W, H>
 {
+    pub fn from<const N: usize>(entries: [(K, V); N]) -> Self {
+        Self {
+            versions: BTreeMap::from([(0, MerkleTreeVersion::from(entries))]),
+        }
+    }
+
     pub fn get_version(&self, version: u64) -> &MerkleTreeVersion<K, V, W, H> {
         let (_, version) = self.versions.range(0..=version).next_back().unwrap();
         version
@@ -1060,6 +1074,36 @@ mod tests {
         test_initial_state(key, 2);
     }
 
+    fn test_from_empty(key: Scalar, version: u64) {
+        let tree = AccountBalanceTree::from([]);
+        assert_eq!(
+            tree.root_hash(version),
+            AccountBalanceTree::default().root_hash(version)
+        );
+        assert_eq!(*tree.get(key, version), Scalar::ZERO);
+        let proof = tree.get_proof(key, version);
+        assert_eq!(proof.key(), key);
+        assert_eq!(proof.value_as_scalar(), Scalar::ZERO);
+        assert_eq!(proof.root_hash(), tree.root_hash(version));
+        assert!(proof.verify(tree.root_hash(version)).is_ok());
+    }
+
+    #[test]
+    fn test_from_empty1() {
+        let key = test_scalar1();
+        test_from_empty(key, 0);
+        test_from_empty(key, 1);
+        test_from_empty(key, 2);
+    }
+
+    #[test]
+    fn test_from_empty2() {
+        let key = test_scalar2();
+        test_from_empty(key, 0);
+        test_from_empty(key, 1);
+        test_from_empty(key, 2);
+    }
+
     #[test]
     fn test_insert_one() {
         let mut tree = AccountBalanceTree::default();
@@ -1102,6 +1146,42 @@ mod tests {
         tree.put(key1, value.clone(), 0);
         let hash2 = tree.root_hash(0);
         assert_ne!(hash1, hash2);
+    }
+
+    #[test]
+    fn test_from_one_element() {
+        let key1 = test_scalar1();
+        let key2 = test_scalar2();
+        let value = test_scalar2();
+        let tree1 = AccountBalanceTree::from([(key1, value)]);
+        let mut tree2 = AccountBalanceTree::default();
+        tree2.put(key1, value.clone(), 0);
+        assert_eq!(tree1.root_hash(0), tree2.root_hash(0));
+        assert_eq!(tree1.root_hash(0), tree2.root_hash(1));
+        assert_eq!(*tree1.get(key1, 0), value);
+        assert_eq!(*tree1.get(key1, 1), value);
+        assert_eq!(*tree1.get(key1, 2), value);
+        let proof1 = tree1.get_proof(key1, 0);
+        assert_eq!(proof1.key(), key1);
+        assert_eq!(proof1.value_as_scalar(), value);
+        assert_eq!(proof1.root_hash(), tree1.root_hash(0));
+        assert_eq!(proof1.root_hash(), tree1.root_hash(1));
+        assert_eq!(proof1.root_hash(), tree1.root_hash(2));
+        assert!(proof1.verify(tree1.root_hash(0)).is_ok());
+        assert_eq!(tree1.get_proof(key1, 1), proof1);
+        assert_eq!(tree1.get_proof(key1, 2), proof1);
+        assert_eq!(*tree1.get(key2, 0), Scalar::ZERO);
+        assert_eq!(*tree1.get(key2, 1), Scalar::ZERO);
+        assert_eq!(*tree1.get(key2, 2), Scalar::ZERO);
+        let proof2 = tree1.get_proof(key2, 0);
+        assert_eq!(proof2.key(), key2);
+        assert_eq!(proof2.value_as_scalar(), Scalar::ZERO);
+        assert_eq!(proof2.root_hash(), tree1.root_hash(0));
+        assert_eq!(proof2.root_hash(), tree1.root_hash(1));
+        assert_eq!(proof2.root_hash(), tree1.root_hash(2));
+        assert!(proof2.verify(tree1.root_hash(0)).is_ok());
+        assert_eq!(tree1.get_proof(key2, 1), proof2);
+        assert_eq!(tree1.get_proof(key2, 2), proof2);
     }
 
     #[test]
@@ -1151,6 +1231,44 @@ mod tests {
         tree.put(key2, value2, 0);
         let hash2 = tree.root_hash(0);
         assert_ne!(hash1, hash2);
+    }
+
+    #[test]
+    fn test_from_two_elements() {
+        let key1 = test_scalar1();
+        let key2 = test_scalar2();
+        let value1 = test_scalar2();
+        let value2 = test_scalar1();
+        let tree1 = AccountBalanceTree::from([(key1, value1), (key2, value2)]);
+        let mut tree2 = AccountBalanceTree::default();
+        tree2.put(key1, value1.clone(), 0);
+        tree2.put(key2, value2.clone(), 0);
+        assert_eq!(tree1.root_hash(0), tree2.root_hash(0));
+        assert_eq!(tree1.root_hash(0), tree2.root_hash(1));
+        assert_eq!(*tree1.get(key1, 0), value1);
+        assert_eq!(*tree1.get(key1, 1), value1);
+        assert_eq!(*tree1.get(key1, 2), value1);
+        let proof1 = tree1.get_proof(key1, 0);
+        assert_eq!(proof1.key(), key1);
+        assert_eq!(proof1.value_as_scalar(), value1);
+        assert_eq!(proof1.root_hash(), tree1.root_hash(0));
+        assert_eq!(proof1.root_hash(), tree1.root_hash(1));
+        assert_eq!(proof1.root_hash(), tree1.root_hash(2));
+        assert!(proof1.verify(tree1.root_hash(0)).is_ok());
+        assert_eq!(tree1.get_proof(key1, 1), proof1);
+        assert_eq!(tree1.get_proof(key1, 2), proof1);
+        assert_eq!(*tree1.get(key2, 0), value2);
+        assert_eq!(*tree1.get(key2, 1), value2);
+        assert_eq!(*tree1.get(key2, 2), value2);
+        let proof2 = tree1.get_proof(key2, 0);
+        assert_eq!(proof2.key(), key2);
+        assert_eq!(proof2.value_as_scalar(), value2);
+        assert_eq!(proof2.root_hash(), tree1.root_hash(0));
+        assert_eq!(proof2.root_hash(), tree1.root_hash(1));
+        assert_eq!(proof2.root_hash(), tree1.root_hash(2));
+        assert!(proof2.verify(tree1.root_hash(0)).is_ok());
+        assert_eq!(tree1.get_proof(key2, 1), proof2);
+        assert_eq!(tree1.get_proof(key2, 2), proof2);
     }
 
     #[test]
@@ -1484,6 +1602,11 @@ mod tests {
                 account_balances_root_hash: Some(proto::pallas_scalar_to_bytes32(
                     tree.root_hash(0),
                 )),
+                staking_balances_root_hash: Some(proto::pallas_scalar_to_bytes32(
+                    utils::parse_pallas_scalar(
+                        "0x3a58ebcf79758fe999e34819d451118b52ca59d7bbaadc089272bc776c9b3694",
+                    ),
+                )),
                 program_storage_root_hash: None,
             })
             .unwrap();
@@ -1513,6 +1636,11 @@ mod tests {
                 last_transaction_hash: None,
                 account_balances_root_hash: Some(proto::pallas_scalar_to_bytes32(
                     tree.root_hash(0),
+                )),
+                staking_balances_root_hash: Some(proto::pallas_scalar_to_bytes32(
+                    utils::parse_pallas_scalar(
+                        "0x3a58ebcf79758fe999e34819d451118b52ca59d7bbaadc089272bc776c9b3694",
+                    ),
                 )),
                 program_storage_root_hash: None,
             })
@@ -1547,6 +1675,11 @@ mod tests {
                 account_balances_root_hash: Some(proto::pallas_scalar_to_bytes32(
                     tree.root_hash(0),
                 )),
+                staking_balances_root_hash: Some(proto::pallas_scalar_to_bytes32(
+                    utils::parse_pallas_scalar(
+                        "0x3a58ebcf79758fe999e34819d451118b52ca59d7bbaadc089272bc776c9b3694",
+                    ),
+                )),
                 program_storage_root_hash: None,
             })
             .unwrap();
@@ -1578,6 +1711,11 @@ mod tests {
                 account_balances_root_hash: Some(proto::pallas_scalar_to_bytes32(
                     tree.root_hash(0),
                 )),
+                staking_balances_root_hash: Some(proto::pallas_scalar_to_bytes32(
+                    utils::parse_pallas_scalar(
+                        "0x3a58ebcf79758fe999e34819d451118b52ca59d7bbaadc089272bc776c9b3694",
+                    ),
+                )),
                 program_storage_root_hash: None,
             })
             .unwrap();
@@ -1608,6 +1746,11 @@ mod tests {
                 last_transaction_hash: None,
                 account_balances_root_hash: Some(proto::pallas_scalar_to_bytes32(
                     tree.root_hash(0),
+                )),
+                staking_balances_root_hash: Some(proto::pallas_scalar_to_bytes32(
+                    utils::parse_pallas_scalar(
+                        "0x3a58ebcf79758fe999e34819d451118b52ca59d7bbaadc089272bc776c9b3694",
+                    ),
                 )),
                 program_storage_root_hash: None,
             })

@@ -30,8 +30,10 @@ pub mod test {
             }
         }
 
-        pub fn advance(&self, delta: Duration) {
-            *self.time.lock().unwrap() += delta;
+        pub async fn advance(&self, delta: Duration) {
+            let mut lock = self.time.lock().unwrap();
+            *lock += delta;
+            tokio::time::advance(delta).await;
         }
     }
 
@@ -55,6 +57,7 @@ mod tests {
     use super::*;
     use std::time::Duration;
     use test::MockClock;
+    use tokio::time::Instant;
 
     #[test]
     fn test_default_mock_clock() {
@@ -71,13 +74,15 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_advance_mock_clock() {
+    #[tokio::test(start_paused = true)]
+    async fn test_advance_mock_clock() {
         let clock = MockClock::new(SystemTime::UNIX_EPOCH + Duration::from_secs(456));
-        clock.advance(Duration::from_secs(789));
+        let start_instant = Instant::now();
+        clock.advance(Duration::from_secs(789)).await;
         assert_eq!(
             clock.now(),
             SystemTime::UNIX_EPOCH + Duration::from_secs(1245)
         );
+        assert_eq!(Instant::now(), start_instant + Duration::from_secs(789));
     }
 }

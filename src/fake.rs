@@ -56,6 +56,16 @@ impl NodeServiceV1 for FakeNodeService {
         }))
     }
 
+    async fn get_staking_balance(
+        &self,
+        _request: Request<dotakon::GetStakingBalanceRequest>,
+    ) -> Result<Response<dotakon::GetStakingBalanceResponse>, Status> {
+        Ok(Response::new(dotakon::GetStakingBalanceResponse {
+            payload: None,
+            signature: None,
+        }))
+    }
+
     async fn broadcast_transaction(
         &self,
         _request: Request<dotakon::BroadcastTransactionRequest>,

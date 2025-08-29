@@ -117,6 +117,7 @@ async fn main() -> Result<()> {
             key_manager.clone(),
             location,
             args.public_address.as_str(),
+            [],
             args.grpc_port,
             args.http_port,
         )?));

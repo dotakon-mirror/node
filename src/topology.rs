@@ -158,6 +158,10 @@ impl Clique {
     pub fn hash(&self) -> H256 {
         self.hash
     }
+
+    pub fn node(&self, index: usize) -> &Node {
+        &self.nodes[index]
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -198,6 +202,10 @@ impl Network {
 
     pub fn root_hash(&self) -> Scalar {
         self.hash
+    }
+
+    pub fn get_self(&self) -> &Node {
+        self.cliques[self.own_clique_index].node(self.own_node_index)
     }
 
     pub async fn broadcast_transaction(&self, transaction: &dotakon::Transaction) -> Result<()> {
@@ -267,7 +275,7 @@ mod tests {
 
     #[test]
     fn test_new_network() {
-        let (_, identity) = testing_identity();
+        let (key_manager, identity) = testing_identity();
         let network = Network::new(identity).unwrap();
         assert_eq!(network.own_clique_index, 0);
         assert_eq!(network.own_node_index, 0);
@@ -277,6 +285,9 @@ mod tests {
                 "0x3f75bfd1de06f77cce4d43d38ffac77eac6a8de697cf3b2a798bc19f1cb1c2b2"
             )
         );
+        let node = network.get_self();
+        assert_eq!(node.account_address(), key_manager.wallet_address());
+        assert_eq!(node.hash(), key_manager.wallet_address());
     }
 
     // TODO

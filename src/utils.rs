@@ -283,7 +283,7 @@ impl VerifiableRandomness {
     }
 }
 
-// TODO: make this production code? The same algorithm is employed in `KeyManager::new`.
+// TODO: make this production code? This is the same algorithm employed in `KeyManager::new`.
 #[cfg(test)]
 fn make_test_keys(secret_key: &str) -> (H256, PointPallas, Point25519) {
     use pasta_curves::group::Group;
@@ -314,6 +314,16 @@ pub fn testing_keys1() -> (H256, PointPallas, Point25519) {
 #[cfg(test)]
 pub fn testing_keys2() -> (H256, PointPallas, Point25519) {
     make_test_keys("0x0fc56ce55997c46f1ba0bce9a8a4daead405c29edf4066a2cd7d0419f592392b".into())
+}
+
+/// WARNING: FOR TESTS ONLY, DO NOT use this key for anything else. They're leaked. If you create a
+/// wallet with this, all your funds will be permanently LOST.
+///
+/// The three returned components are: the secret key, the public Pallas key, and the public
+/// Curve25519 key.
+#[cfg(test)]
+pub fn testing_keys3() -> (H256, PointPallas, Point25519) {
+    make_test_keys("0xc49a0b9c6d9c6e1b9e796cf5f6295d5cc564ca52a04183e5e04efac2f7e6a9a8".into())
 }
 
 #[cfg(test)]
