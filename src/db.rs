@@ -197,11 +197,11 @@ pub struct Transaction {
 }
 
 impl Transaction {
-    fn hash_transfer_coins_transaction(
+    fn hash_send_coins_transaction(
         parent_hash: Scalar,
         nonce: u64,
         sender_address: Scalar,
-        transaction: &dotakon::transaction::TransferCoins,
+        transaction: &dotakon::transaction::SendCoins,
     ) -> Result<Scalar> {
         Ok(utils::poseidon_hash([
             parent_hash,
@@ -233,8 +233,8 @@ impl Transaction {
             &signature.signer.context("invalid transaction signature")?,
         )?;
         let hash = match &decoded.transaction.context("invalid transaction")? {
-            dotakon::transaction::payload::Transaction::TransferCoins(transaction) => {
-                Self::hash_transfer_coins_transaction(parent_hash, nonce, signer, transaction)
+            dotakon::transaction::payload::Transaction::SendCoins(transaction) => {
+                Self::hash_send_coins_transaction(parent_hash, nonce, signer, transaction)
             }
             _ => Err(anyhow!("unknown transaction type")),
         }?;
@@ -261,7 +261,7 @@ impl Transaction {
 
     pub fn make_coin_transfer_proto(
         key_manager: &keys::KeyManager,
-        signature_secret_nonce: H256,
+        secret_signature_nonce: H256,
         transaction_nonce: u64,
         recipient_address: Scalar,
         amount: Scalar,
@@ -269,14 +269,14 @@ impl Transaction {
         let (payload, signature) = key_manager.sign_message(
             &dotakon::transaction::Payload {
                 nonce: Some(transaction_nonce),
-                transaction: Some(dotakon::transaction::payload::Transaction::TransferCoins(
-                    dotakon::transaction::TransferCoins {
+                transaction: Some(dotakon::transaction::payload::Transaction::SendCoins(
+                    dotakon::transaction::SendCoins {
                         recipient: Some(proto::pallas_scalar_to_bytes32(recipient_address)),
                         amount: Some(proto::pallas_scalar_to_bytes32(amount)),
                     },
                 )),
             },
-            signature_secret_nonce,
+            secret_signature_nonce,
         )?;
         Ok(dotakon::Transaction {
             payload: Some(payload),
@@ -316,9 +316,12 @@ impl PoseidonHash for Transaction {
     }
 }
 
-fn make_genesis_block(timestamp: SystemTime, network_topology_root_hash: Scalar) -> BlockInfo {
+fn make_genesis_block(
+    timestamp: SystemTime,
+    network_topology_root_hash: Scalar,
+    account_balances_root_hash: Scalar,
+) -> BlockInfo {
     let block_number = 0;
-    let account_balances_root_hash = tree::AccountBalanceTree::default().root_hash(block_number);
     let program_storage_root_hash = tree::ProgramStorageTree::default().root_hash(block_number);
     BlockInfo::new(
         block_number,
@@ -335,21 +338,32 @@ struct Repr {
     blocks: Vec<BlockInfo>,
     block_numbers_by_hash: BTreeMap<Scalar, usize>,
     network_topologies: BTreeMap<u64, topology::Network>,
-    transactions: BTreeMap<Scalar, Transaction>,
+    transactions: Vec<Transaction>,
+    transactions_by_hash: BTreeMap<Scalar, usize>,
     account_balances: tree::AccountBalanceTree,
     program_storage: tree::ProgramStorageTree,
 }
 
 impl Repr {
-    fn new(clock: &Arc<dyn Clock>, identity: dotakon::NodeIdentity) -> Result<Self> {
+    fn new<const N: usize>(
+        clock: &Arc<dyn Clock>,
+        identity: dotakon::NodeIdentity,
+        initial_balances: [(Scalar, Scalar); N],
+    ) -> Result<Self> {
         let network = topology::Network::new(identity)?;
-        let genesis_block = make_genesis_block(clock.now(), network.root_hash());
+        let account_balances = tree::AccountBalanceTree::from(initial_balances);
+        let genesis_block = make_genesis_block(
+            clock.now(),
+            network.root_hash(),
+            account_balances.root_hash(0),
+        );
         Ok(Self {
             blocks: vec![genesis_block],
             block_numbers_by_hash: BTreeMap::from([(genesis_block.hash, 0)]),
             network_topologies: BTreeMap::from([(0, network)]),
-            transactions: BTreeMap::new(),
-            account_balances: tree::AccountBalanceTree::default(),
+            transactions: vec![],
+            transactions_by_hash: BTreeMap::new(),
+            account_balances,
             program_storage: tree::ProgramStorageTree::default(),
         })
     }
@@ -379,7 +393,8 @@ impl Repr {
     }
 
     fn get_transaction(&self, hash: Scalar) -> Option<Transaction> {
-        self.transactions.get(&hash).cloned()
+        let index = *(self.transactions_by_hash.get(&hash)?);
+        Some(self.transactions[index].clone())
     }
 
     fn get_balance(
@@ -408,6 +423,94 @@ impl Repr {
                 .get_proof(account_address, block.number),
         ))
     }
+
+    fn apply_send_coins_transaction(
+        &mut self,
+        signer: Scalar,
+        payload: &dotakon::transaction::SendCoins,
+    ) -> Result<()> {
+        let version = self.current_version();
+        let recipient = proto::pallas_scalar_from_bytes32(
+            &payload
+                .recipient
+                .context("invalid coin transfer transaction payload: missing recipient")?,
+        )?;
+        let amount = proto::pallas_scalar_from_bytes32(
+            &payload
+                .amount
+                .context("invalid coin transfer transaction payload: missing amount")?,
+        )?;
+        let sender_balance = *self.account_balances.get(signer, version);
+        if sender_balance < amount {
+            return Err(anyhow!(
+                "insufficient balance for {:#x}",
+                utils::pallas_scalar_to_u256(signer)
+            ));
+        }
+        self.account_balances
+            .put(signer, sender_balance - amount, version);
+        let recipient_balance = *self.account_balances.get(recipient, version);
+        self.account_balances
+            .put(recipient, recipient_balance + amount, version);
+        Ok(())
+    }
+
+    fn apply_transaction(&mut self, index: usize) -> Result<()> {
+        let transaction = &self.transactions[index];
+        let signer = transaction.signer();
+        match &transaction.payload().transaction {
+            Some(dotakon::transaction::payload::Transaction::SendCoins(payload)) => {
+                self.apply_send_coins_transaction(signer, payload)
+            }
+            Some(dotakon::transaction::payload::Transaction::CreateProgram(_)) => {
+                unimplemented!()
+            }
+            None => Err(anyhow!("invalid transaction payload")),
+        }
+    }
+
+    fn add_verified_transaction(&mut self, transaction: &dotakon::Transaction) -> Result<Scalar> {
+        let parent_hash = match self.transactions.last() {
+            Some(last_transaction) => last_transaction.hash(),
+            None => Scalar::ZERO,
+        };
+        let transaction = Transaction::from_proto(parent_hash, transaction.clone())?;
+        let hash = transaction.hash();
+        let index = self.transactions.len();
+        self.transactions.push(transaction);
+        self.transactions_by_hash.insert(hash, index);
+        self.apply_transaction(index)?;
+        Ok(hash)
+    }
+
+    fn close_block(&mut self, timestamp: SystemTime) {
+        let block_number = self.current_version();
+        let previous_block_hash = self.blocks.last().unwrap().hash();
+        let (_, network_topology) = self
+            .network_topologies
+            .range(0..=block_number)
+            .next_back()
+            .unwrap();
+        let last_transaction_hash = match self.transactions.last() {
+            Some(transaction) => transaction.hash(),
+            None => Scalar::ZERO,
+        };
+        let account_balances_root_hash = self.account_balances.root_hash(block_number);
+        let program_storage_root_hash = self.program_storage.root_hash(block_number);
+        let block = BlockInfo::new(
+            block_number,
+            previous_block_hash,
+            timestamp,
+            network_topology.root_hash(),
+            last_transaction_hash,
+            account_balances_root_hash,
+            program_storage_root_hash,
+        );
+        let block_hash = block.hash();
+        self.blocks.push(block);
+        self.block_numbers_by_hash
+            .insert(block_hash, block_number as usize);
+    }
 }
 
 pub struct Db {
@@ -416,8 +519,12 @@ pub struct Db {
 }
 
 impl Db {
-    pub fn new(clock: Arc<dyn Clock>, identity: dotakon::NodeIdentity) -> Result<Self> {
-        let repr = Repr::new(&clock, identity)?;
+    pub fn new<const N: usize>(
+        clock: Arc<dyn Clock>,
+        identity: dotakon::NodeIdentity,
+        initial_balances: [(Scalar, Scalar); N],
+    ) -> Result<Self> {
+        let repr = Repr::new(&clock, identity, initial_balances)?;
         Ok(Self {
             clock,
             repr: Mutex::new(repr),
@@ -464,6 +571,18 @@ impl Db {
             .unwrap()
             .get_latest_balance(account_address)
     }
+
+    fn add_verified_transaction(&self, transaction: &dotakon::Transaction) -> Result<Scalar> {
+        self.repr
+            .lock()
+            .unwrap()
+            .add_verified_transaction(transaction)
+    }
+
+    fn close_block(&self) {
+        let mut repr = self.repr.lock().unwrap();
+        repr.close_block(self.clock.now());
+    }
 }
 
 #[cfg(test)]
@@ -471,6 +590,7 @@ mod tests {
     use super::*;
     use crate::clock::test::MockClock;
     use crate::keys;
+    use crate::tree::AccountBalanceTree;
     use crate::utils;
     use crate::version;
     use ff::PrimeField;
@@ -569,7 +689,11 @@ mod tests {
         );
         assert_ne!(
             block,
-            make_genesis_block(timestamp, network_topology_root_hash)
+            make_genesis_block(
+                timestamp,
+                network_topology_root_hash,
+                account_balances_root_hash
+            )
         );
         assert_eq!(
             block.hash(),
@@ -597,7 +721,12 @@ mod tests {
     fn test_genesis_block() {
         let timestamp = SystemTime::UNIX_EPOCH + Duration::from_secs(71104);
         let network = topology::Network::new(testing_identity()).unwrap();
-        let block = make_genesis_block(timestamp, network.root_hash());
+        let account_balances = AccountBalanceTree::from([]);
+        let block = make_genesis_block(
+            timestamp,
+            network.root_hash(),
+            account_balances.root_hash(0),
+        );
         assert_eq!(block.hash(), genesis_block_hash());
         assert_eq!(block.number(), 0);
         assert_eq!(block.previous_block_hash(), Scalar::ZERO);
@@ -792,7 +921,7 @@ mod tests {
     #[test]
     fn test_initial_state() {
         let clock = mock_clock(SystemTime::UNIX_EPOCH + Duration::from_secs(71104));
-        let db = Db::new(clock, testing_identity()).unwrap();
+        let db = Db::new(clock, testing_identity(), []).unwrap();
         assert_eq!(db.current_version(), 1);
         let genesis_block_hash = genesis_block_hash();
         assert_eq!(
@@ -818,7 +947,7 @@ mod tests {
 
     fn test_initial_balance(public_key: Point) {
         let clock = mock_clock(SystemTime::UNIX_EPOCH + Duration::from_secs(71104));
-        let db = Db::new(clock, testing_identity()).unwrap();
+        let db = Db::new(clock, testing_identity(), []).unwrap();
         let account_address = utils::public_key_to_wallet_address(public_key);
         let (block, proof) = db.get_latest_balance(account_address).unwrap();
         assert_eq!(block.hash(), genesis_block_hash());
@@ -838,9 +967,9 @@ mod tests {
         test_initial_balance(public_key);
     }
 
-    fn test_balance_at_first_block(public_key: Point) {
+    fn test_balance_at_first_version(public_key: Point) {
         let clock = mock_clock(SystemTime::UNIX_EPOCH + Duration::from_secs(71104));
-        let db = Db::new(clock, testing_identity()).unwrap();
+        let db = Db::new(clock, testing_identity(), []).unwrap();
         let account_address = utils::public_key_to_wallet_address(public_key);
         let (block, proof) = db
             .get_balance(account_address, genesis_block_hash())
@@ -851,15 +980,131 @@ mod tests {
     }
 
     #[test]
-    fn test_balance_at_first_block1() {
+    fn test_balance_at_first_version1() {
         let (_, public_key, _) = utils::testing_keys1();
-        test_balance_at_first_block(public_key);
+        test_balance_at_first_version(public_key);
     }
 
     #[test]
-    fn test_balance_at_first_block2() {
+    fn test_balance_at_first_version2() {
         let (_, public_key, _) = utils::testing_keys2();
-        test_balance_at_first_block(public_key);
+        test_balance_at_first_version(public_key);
+    }
+
+    #[test]
+    fn test_close_empty_block() {
+        let (_, public_key1, _) = utils::testing_keys1();
+        let address1 = utils::public_key_to_wallet_address(public_key1);
+        let (_, public_key2, _) = utils::testing_keys2();
+        let address2 = utils::public_key_to_wallet_address(public_key2);
+        let clock = mock_clock(SystemTime::UNIX_EPOCH + Duration::from_secs(71104));
+        let db = Db::new(
+            clock,
+            testing_identity(),
+            [(address1, Scalar::from(321)), (address2, Scalar::from(100))],
+        )
+        .unwrap();
+        let block_hash1 = db.get_latest_block().hash();
+        db.close_block();
+        let block_hash2 = db.get_latest_block().hash();
+        assert_ne!(block_hash1, block_hash2);
+        let (_, proof) = db.get_balance(address1, block_hash1).unwrap();
+        assert_eq!(proof.value_as_scalar(), Scalar::from(321));
+        let (_, proof) = db.get_balance(address2, block_hash1).unwrap();
+        assert_eq!(proof.value_as_scalar(), Scalar::from(100));
+        let (_, proof) = db.get_balance(address1, block_hash2).unwrap();
+        assert_eq!(proof.value_as_scalar(), Scalar::from(321));
+        let (_, proof) = db.get_balance(address2, block_hash2).unwrap();
+        assert_eq!(proof.value_as_scalar(), Scalar::from(100));
+    }
+
+    #[test]
+    fn test_add_transaction() {
+        let (secret_key, public_key1, _) = utils::testing_keys1();
+        let address1 = utils::public_key_to_wallet_address(public_key1);
+        let key_manager = keys::KeyManager::new(secret_key);
+        let (_, public_key2, _) = utils::testing_keys2();
+        let address2 = utils::public_key_to_wallet_address(public_key2);
+        let clock = mock_clock(SystemTime::UNIX_EPOCH + Duration::from_secs(71104));
+        let db = Db::new(
+            clock,
+            testing_identity(),
+            [(address1, Scalar::from(321)), (address2, Scalar::from(100))],
+        )
+        .unwrap();
+        assert!(
+            db.add_verified_transaction(
+                &Transaction::make_coin_transfer_proto(
+                    &key_manager,
+                    H256::from_slice(&[
+                        1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+                        21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 0,
+                    ]),
+                    1,
+                    address2,
+                    Scalar::from(123)
+                )
+                .unwrap()
+            )
+            .is_ok()
+        );
+        let block_hash1 = db.get_latest_block().hash();
+        db.close_block();
+        let block_hash2 = db.get_latest_block().hash();
+        let (_, proof) = db.get_balance(address1, block_hash1).unwrap();
+        assert_eq!(proof.value_as_scalar(), Scalar::from(321));
+        let (_, proof) = db.get_balance(address2, block_hash1).unwrap();
+        assert_eq!(proof.value_as_scalar(), Scalar::from(100));
+        let (_, proof) = db.get_balance(address1, block_hash2).unwrap();
+        assert_eq!(proof.value_as_scalar(), Scalar::from(198));
+        let (_, proof) = db.get_balance(address2, block_hash2).unwrap();
+        assert_eq!(proof.value_as_scalar(), Scalar::from(223));
+    }
+
+    #[test]
+    fn test_add_two_transactions() {
+        let (secret_key1, public_key1, _) = utils::testing_keys1();
+        let address1 = utils::public_key_to_wallet_address(public_key1);
+        let km1 = keys::KeyManager::new(secret_key1);
+        let (secret_key2, public_key2, _) = utils::testing_keys2();
+        let address2 = utils::public_key_to_wallet_address(public_key2);
+        let km2 = keys::KeyManager::new(secret_key2);
+        let clock = mock_clock(SystemTime::UNIX_EPOCH + Duration::from_secs(71104));
+        let db = Db::new(
+            clock,
+            testing_identity(),
+            [(address1, Scalar::from(321)), (address2, Scalar::from(100))],
+        )
+        .unwrap();
+        let nonce = H256::from_slice(&[
+            1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+            24, 25, 26, 27, 28, 29, 30, 31, 0,
+        ]);
+        assert!(
+            db.add_verified_transaction(
+                &Transaction::make_coin_transfer_proto(&km1, nonce, 1, address2, Scalar::from(123))
+                    .unwrap()
+            )
+            .is_ok()
+        );
+        assert!(
+            db.add_verified_transaction(
+                &Transaction::make_coin_transfer_proto(&km2, nonce, 1, address1, Scalar::from(42))
+                    .unwrap()
+            )
+            .is_ok()
+        );
+        let block_hash1 = db.get_latest_block().hash();
+        db.close_block();
+        let block_hash2 = db.get_latest_block().hash();
+        let (_, proof) = db.get_balance(address1, block_hash1).unwrap();
+        assert_eq!(proof.value_as_scalar(), Scalar::from(321));
+        let (_, proof) = db.get_balance(address2, block_hash1).unwrap();
+        assert_eq!(proof.value_as_scalar(), Scalar::from(100));
+        let (_, proof) = db.get_balance(address1, block_hash2).unwrap();
+        assert_eq!(proof.value_as_scalar(), Scalar::from(240));
+        let (_, proof) = db.get_balance(address2, block_hash2).unwrap();
+        assert_eq!(proof.value_as_scalar(), Scalar::from(181));
     }
 
     // TODO

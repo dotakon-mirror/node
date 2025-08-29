@@ -64,11 +64,12 @@ impl NodeService {
         }
     }
 
-    pub fn new(
+    pub fn new<const N: usize>(
         clock: Arc<dyn Clock>,
         key_manager: Arc<keys::KeyManager>,
         location: dotakon::GeographicalLocation,
         public_address: &str,
+        initial_balances: [(Scalar, Scalar); N],
         grpc_port: u16,
         http_port: u16,
     ) -> anyhow::Result<Self> {
@@ -94,6 +95,7 @@ impl NodeService {
                     payload: Some(identity_payload),
                     signature: Some(identity_signature),
                 },
+                initial_balances,
             )?,
         })
     }
@@ -368,6 +370,7 @@ mod tests {
                     server_key_manager.clone(),
                     location,
                     "localhost",
+                    [],
                     4443,
                     8080,
                 )
