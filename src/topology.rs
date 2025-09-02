@@ -220,6 +220,8 @@ mod tests {
     use crate::utils;
     use primitive_types::H256;
 
+    const TEST_CHAIN_ID: u64 = 42;
+
     fn testing_identity() -> (keys::KeyManager, dotakon::NodeIdentity) {
         let (secret_key, _, _) = utils::testing_keys1();
         let key_manager = keys::KeyManager::new(secret_key);
@@ -229,6 +231,7 @@ mod tests {
                 minor: Some(0),
                 build: Some(0),
             }),
+            chain_id: Some(TEST_CHAIN_ID),
             account_address: Some(proto::pallas_scalar_to_bytes32(
                 key_manager.wallet_address(),
             )),

@@ -42,6 +42,7 @@ impl NodeServiceImpl {
     }
 
     fn make_node_identity(
+        chain_id: u64,
         timestamp: SystemTime,
         key_manager: &keys::KeyManager,
         location: dotakon::GeographicalLocation,
@@ -51,6 +52,7 @@ impl NodeServiceImpl {
     ) -> dotakon::node_identity::Payload {
         dotakon::node_identity::Payload {
             protocol_version: Some(Self::get_protocol_version()),
+            chain_id: Some(chain_id),
             account_address: Some(proto::pallas_scalar_to_bytes32(
                 key_manager.wallet_address(),
             )),
@@ -66,6 +68,7 @@ impl NodeServiceImpl {
         clock: Arc<dyn Clock>,
         key_manager: Arc<keys::KeyManager>,
         location: dotakon::GeographicalLocation,
+        chain_id: u64,
         public_address: &str,
         initial_balances: [(Scalar, Scalar); N],
         grpc_port: u16,
@@ -81,6 +84,7 @@ impl NodeServiceImpl {
             utils::format_wallet_address(key_manager.wallet_address())
         );
         let identity = Self::make_node_identity(
+            chain_id,
             clock.now(),
             &key_manager,
             location,
@@ -95,6 +99,7 @@ impl NodeServiceImpl {
             identity,
             db: db::Db::new(
                 clock,
+                chain_id,
                 dotakon::NodeIdentity {
                     payload: Some(identity_payload),
                     signature: Some(identity_signature),
@@ -291,6 +296,7 @@ impl NodeService {
         clock: Arc<dyn Clock>,
         key_manager: Arc<keys::KeyManager>,
         location: dotakon::GeographicalLocation,
+        chain_id: u64,
         public_address: &str,
         initial_balances: [(Scalar, Scalar); N],
         grpc_port: u16,
@@ -301,6 +307,7 @@ impl NodeService {
                 clock,
                 key_manager,
                 location,
+                chain_id,
                 public_address,
                 initial_balances,
                 grpc_port,
@@ -333,6 +340,7 @@ impl NodeServiceV1 for NodeService {
         let block_info = self.inner.get_block_impl(request.get_ref()).await?;
         let descriptor = dotakon::BlockDescriptor {
             block_hash: Some(proto::pallas_scalar_to_bytes32(block_info.hash())),
+            chain_id: Some(block_info.chain_id()),
             block_number: Some(block_info.number()),
             previous_block_hash: Some(proto::pallas_scalar_to_bytes32(
                 block_info.previous_block_hash(),
@@ -448,7 +456,7 @@ impl NodeServiceV1 for NodeService {
             .map_err(|_| Status::invalid_argument("invalid transaction signature"))?;
         self.inner
             .db
-            .add_verified_transaction(transaction)
+            .add_transaction(transaction)
             .await
             .map_err(|_| Status::internal("transaction error"))?;
         Ok(Response::new(dotakon::BroadcastTransactionResponse {}))
@@ -485,6 +493,8 @@ mod tests {
     use ff::Field;
     use tokio::{sync::Notify, task::JoinHandle, task::yield_now};
     use tonic::transport::{Channel, Server};
+
+    const TEST_CHAIN_ID: u64 = 42;
 
     struct TestFixture {
         clock: Arc<MockClock>,
@@ -527,6 +537,7 @@ mod tests {
                     clock.clone(),
                     server_key_manager.clone(),
                     location,
+                    TEST_CHAIN_ID,
                     "localhost",
                     initial_balances,
                     4443,
@@ -604,7 +615,7 @@ mod tests {
 
     fn default_genesis_block_hash() -> Scalar {
         utils::u256_to_pallas_scalar(
-            "0x202a0f4cfb473b0852b25e844c0f9feca9e8f9d3b327952e67d920c71ae32c31"
+            "0x24b2e9d8d308a17904d117c9f803070ba398cf300845adb572c9b43d07d607fc"
                 .parse()
                 .unwrap(),
         )
@@ -899,7 +910,7 @@ mod tests {
         assert_eq!(
             block_info.hash(),
             utils::parse_pallas_scalar(
-                "0x098cddd3b6635b060547bc5c4f58f66dfad68ff776c36e0ac0eb128074d00e29"
+                "0x32c1d7f74f3301d81568aa0b88dcf4e3ffa15d124aacf861079e4ba23dadb4db"
             )
         );
 
@@ -996,6 +1007,7 @@ mod tests {
         );
 
         fixture.clock().advance(Duration::from_secs(10)).await;
+        yield_now().await;
 
         let response = fixture
             .client
@@ -1016,7 +1028,7 @@ mod tests {
         assert_eq!(
             proto::pallas_scalar_from_bytes32(&payload.block_hash.unwrap()).unwrap(),
             utils::parse_pallas_scalar(
-                "0x0740a2de3e2fcd9b519c143f48fdd70f4af3fa10045c1ef84e0cd0a9a028e9b0"
+                "0x3a5989f10ab4a6bd7d24062c63187c29a0cefdf74a35c6a6eb0a3a15028c42b9"
             )
         );
     }

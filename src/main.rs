@@ -66,6 +66,10 @@ struct Args {
     #[arg(long)]
     longitude: f64,
 
+    /// The globally unique ID of the network this node will join or create.
+    #[arg(long)]
+    chain_id: u64,
+
     /// A list of well-known nodes to connect to in order to join an existing network. If the list
     /// is left empty this node will start a new network.
     #[arg(long, default_value = "")]
@@ -116,6 +120,7 @@ async fn main() -> Result<()> {
             Arc::new(clock::RealClock::default()),
             key_manager.clone(),
             location,
+            args.chain_id,
             args.public_address.as_str(),
             [],
             args.grpc_port,

@@ -1594,6 +1594,7 @@ mod tests {
         let proto = proof
             .encode(dotakon::BlockDescriptor {
                 block_hash: None,
+                chain_id: None,
                 block_number: None,
                 previous_block_hash: None,
                 timestamp: None,
@@ -1629,6 +1630,7 @@ mod tests {
         let proto = proof
             .encode(dotakon::BlockDescriptor {
                 block_hash: None,
+                chain_id: None,
                 block_number: None,
                 previous_block_hash: None,
                 timestamp: None,
@@ -1667,6 +1669,7 @@ mod tests {
         let mut proto = proof
             .encode(dotakon::BlockDescriptor {
                 block_hash: None,
+                chain_id: None,
                 block_number: None,
                 previous_block_hash: None,
                 timestamp: None,
@@ -1703,6 +1706,7 @@ mod tests {
         let mut proto = proof
             .encode(dotakon::BlockDescriptor {
                 block_hash: None,
+                chain_id: None,
                 block_number: None,
                 previous_block_hash: None,
                 timestamp: None,
@@ -1739,6 +1743,7 @@ mod tests {
         let mut proto = proof
             .encode(dotakon::BlockDescriptor {
                 block_hash: None,
+                chain_id: None,
                 block_number: None,
                 previous_block_hash: None,
                 timestamp: None,
