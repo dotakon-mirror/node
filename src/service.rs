@@ -4,7 +4,7 @@ use crate::dotakon::{self, node_service_v1_server::NodeServiceV1};
 use crate::keys;
 use crate::net;
 use crate::proto;
-use crate::tree;
+use crate::tree::{self, AccountInfo};
 use crate::utils;
 use crate::version;
 use anyhow::Context;
@@ -70,7 +70,7 @@ impl NodeServiceImpl {
         location: dotakon::GeographicalLocation,
         chain_id: u64,
         public_address: &str,
-        initial_balances: [(Scalar, Scalar); N],
+        initial_accounts: [(Scalar, AccountInfo); N],
         grpc_port: u16,
         http_port: u16,
     ) -> anyhow::Result<Arc<Self>> {
@@ -104,7 +104,7 @@ impl NodeServiceImpl {
                     payload: Some(identity_payload),
                     signature: Some(identity_signature),
                 },
-                initial_balances,
+                initial_accounts,
             )?,
             cancel: CancellationToken::new(),
         });
@@ -172,6 +172,45 @@ impl NodeServiceImpl {
         }
     }
 
+    async fn get_account_impl(
+        &self,
+        request: &dotakon::GetAccountRequest,
+    ) -> Result<(db::BlockInfo, tree::AccountProof), Status> {
+        let account_address = proto::pallas_scalar_from_bytes32(
+            &request
+                .account_address
+                .context("missing account address field")
+                .map_err(|error| Status::invalid_argument(error.to_string()))?,
+        )
+        .map_err(|_| Status::invalid_argument("invalid account address"))?;
+        match request.block_hash {
+            Some(block_hash) => {
+                let block_hash = proto::pallas_scalar_from_bytes32(&block_hash)
+                    .map_err(|_| Status::invalid_argument("invalid block hash"))?;
+                self.db
+                    .get_account_info(account_address, block_hash)
+                    .await
+                    .map_err(|_| {
+                        Status::not_found(format!(
+                            "account address {:#x} not found at block {:#x}",
+                            utils::pallas_scalar_to_u256(account_address),
+                            utils::pallas_scalar_to_u256(block_hash)
+                        ))
+                    })
+            }
+            None => self
+                .db
+                .get_latest_account_info(account_address)
+                .await
+                .map_err(|_| {
+                    Status::not_found(format!(
+                        "account address {:#x} not found",
+                        utils::pallas_scalar_to_u256(account_address)
+                    ))
+                }),
+        }
+    }
+
     async fn get_transaction_impl(
         &self,
         request: &dotakon::GetTransactionRequest,
@@ -194,84 +233,6 @@ impl NodeServiceImpl {
             ))),
         }
     }
-
-    async fn get_account_balance_impl(
-        &self,
-        request: &dotakon::GetAccountBalanceRequest,
-    ) -> Result<(db::BlockInfo, tree::AccountBalanceProof), Status> {
-        let account_address = proto::pallas_scalar_from_bytes32(
-            &request
-                .account_address
-                .context("missing account address field")
-                .map_err(|error| Status::invalid_argument(error.to_string()))?,
-        )
-        .map_err(|_| Status::invalid_argument("invalid account address"))?;
-        match request.block_hash {
-            Some(block_hash) => {
-                let block_hash = proto::pallas_scalar_from_bytes32(&block_hash)
-                    .map_err(|_| Status::invalid_argument("invalid block hash"))?;
-                self.db
-                    .get_balance(account_address, block_hash)
-                    .await
-                    .map_err(|_| {
-                        Status::not_found(format!(
-                            "account address {:#x} not found at block {:#x}",
-                            utils::pallas_scalar_to_u256(account_address),
-                            utils::pallas_scalar_to_u256(block_hash)
-                        ))
-                    })
-            }
-            None => self
-                .db
-                .get_latest_balance(account_address)
-                .await
-                .map_err(|_| {
-                    Status::not_found(format!(
-                        "account address {:#x} not found",
-                        utils::pallas_scalar_to_u256(account_address)
-                    ))
-                }),
-        }
-    }
-
-    async fn get_staking_balance_impl(
-        &self,
-        request: &dotakon::GetStakingBalanceRequest,
-    ) -> Result<(db::BlockInfo, tree::AccountBalanceProof), Status> {
-        let account_address = proto::pallas_scalar_from_bytes32(
-            &request
-                .account_address
-                .context("missing account address field")
-                .map_err(|error| Status::invalid_argument(error.to_string()))?,
-        )
-        .map_err(|_| Status::invalid_argument("invalid account address"))?;
-        match request.block_hash {
-            Some(block_hash) => {
-                let block_hash = proto::pallas_scalar_from_bytes32(&block_hash)
-                    .map_err(|_| Status::invalid_argument("invalid block hash"))?;
-                self.db
-                    .get_staking_balance(account_address, block_hash)
-                    .await
-                    .map_err(|_| {
-                        Status::not_found(format!(
-                            "account address {:#x} not found at block {:#x}",
-                            utils::pallas_scalar_to_u256(account_address),
-                            utils::pallas_scalar_to_u256(block_hash)
-                        ))
-                    })
-            }
-            None => self
-                .db
-                .get_latest_staking_balance(account_address)
-                .await
-                .map_err(|_| {
-                    Status::not_found(format!(
-                        "account address {:#x} not found",
-                        utils::pallas_scalar_to_u256(account_address)
-                    ))
-                }),
-        }
-    }
 }
 
 impl Drop for NodeServiceImpl {
@@ -291,7 +252,7 @@ impl NodeService {
         location: dotakon::GeographicalLocation,
         chain_id: u64,
         public_address: &str,
-        initial_balances: [(Scalar, Scalar); N],
+        initial_accounts: [(Scalar, AccountInfo); N],
         grpc_port: u16,
         http_port: u16,
     ) -> anyhow::Result<Self> {
@@ -302,7 +263,7 @@ impl NodeService {
                 location,
                 chain_id,
                 public_address,
-                initial_balances,
+                initial_accounts,
                 grpc_port,
                 http_port,
             )?,
@@ -354,6 +315,23 @@ impl NodeServiceV1 for NodeService {
         Ok(Response::new(dotakon::NetworkTopology { cluster: vec![] }))
     }
 
+    async fn get_account(
+        &self,
+        request: Request<dotakon::GetAccountRequest>,
+    ) -> Result<Response<dotakon::GetAccountResponse>, Status> {
+        let (block_info, proof) = self.inner.get_account_impl(request.get_ref()).await?;
+        let payload = proof
+            .encode(block_info.encode())
+            .map_err(|_| Status::internal("internal error"))?;
+        let (payload, signature) = self
+            .sign_message(&payload)
+            .map_err(|_| Status::internal("signature error"))?;
+        Ok(Response::new(dotakon::GetAccountResponse {
+            payload: Some(payload),
+            signature: Some(signature),
+        }))
+    }
+
     async fn get_transaction(
         &self,
         request: Request<dotakon::GetTransactionRequest>,
@@ -363,46 +341,6 @@ impl NodeServiceV1 for NodeService {
             .sign_message(&transaction)
             .map_err(|_| Status::internal("internal error"))?;
         Ok(Response::new(dotakon::GetTransactionResponse {
-            payload: Some(payload),
-            signature: Some(signature),
-        }))
-    }
-
-    async fn get_account_balance(
-        &self,
-        request: Request<dotakon::GetAccountBalanceRequest>,
-    ) -> Result<Response<dotakon::GetAccountBalanceResponse>, Status> {
-        let (block_info, proof) = self
-            .inner
-            .get_account_balance_impl(request.get_ref())
-            .await?;
-        let payload = proof
-            .encode(block_info.encode())
-            .map_err(|_| Status::internal("internal error"))?;
-        let (payload, signature) = self
-            .sign_message(&payload)
-            .map_err(|_| Status::internal("signature error"))?;
-        Ok(Response::new(dotakon::GetAccountBalanceResponse {
-            payload: Some(payload),
-            signature: Some(signature),
-        }))
-    }
-
-    async fn get_staking_balance(
-        &self,
-        request: Request<dotakon::GetStakingBalanceRequest>,
-    ) -> Result<Response<dotakon::GetStakingBalanceResponse>, Status> {
-        let (block_info, proof) = self
-            .inner
-            .get_staking_balance_impl(request.get_ref())
-            .await?;
-        let payload = proof
-            .encode(block_info.encode())
-            .map_err(|_| Status::internal("internal error"))?;
-        let (payload, signature) = self
-            .sign_message(&payload)
-            .map_err(|_| Status::internal("signature error"))?;
-        Ok(Response::new(dotakon::GetStakingBalanceResponse {
             payload: Some(payload),
             signature: Some(signature),
         }))
@@ -479,7 +417,7 @@ mod tests {
     impl TestFixture {
         async fn new<const N: usize>(
             location: dotakon::GeographicalLocation,
-            initial_balances: [(Scalar, Scalar); N],
+            initial_accounts: [(Scalar, AccountInfo); N],
         ) -> anyhow::Result<Self> {
             let nonce = H256::from_slice(&[
                 1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22,
@@ -511,7 +449,7 @@ mod tests {
                     location,
                     TEST_CHAIN_ID,
                     "localhost",
-                    initial_balances,
+                    initial_accounts,
                     4443,
                     8080,
                 )
@@ -565,7 +503,8 @@ mod tests {
                     latitude: Some(71i32),
                     longitude: Some(104u32),
                 },
-                initial_balances,
+                initial_balances
+                    .map(|(address, balance)| (address, AccountInfo::with_balance(balance))),
             )
             .await
         }
@@ -587,7 +526,7 @@ mod tests {
 
     fn default_genesis_block_hash() -> Scalar {
         utils::u256_to_pallas_scalar(
-            "0x1fd648f9346ee50789d7abed3554e70990c0c180ad00d0d0228066d6e072d794"
+            "0x279760377f1ebc7931e1804663b301f687630a6144947353b710ed811bfcb2c5"
                 .parse()
                 .unwrap(),
         )
@@ -678,17 +617,9 @@ mod tests {
             )
         );
         assert_eq!(
-            proto::pallas_scalar_from_bytes32(&payload.account_balances_root_hash.unwrap())
-                .unwrap(),
+            proto::pallas_scalar_from_bytes32(&payload.accounts_root_hash.unwrap()).unwrap(),
             utils::parse_pallas_scalar(
-                "0x3a58ebcf79758fe999e34819d451118b52ca59d7bbaadc089272bc776c9b3694"
-            )
-        );
-        assert_eq!(
-            proto::pallas_scalar_from_bytes32(&payload.staking_balances_root_hash.unwrap())
-                .unwrap(),
-            utils::parse_pallas_scalar(
-                "0x3a58ebcf79758fe999e34819d451118b52ca59d7bbaadc089272bc776c9b3694"
+                "0x2d79ad7ee66416fc6ddaabd61a1a2d597852c655652ded77128a651f1f0966b4"
             )
         );
         assert_eq!(
@@ -736,17 +667,9 @@ mod tests {
             )
         );
         assert_eq!(
-            proto::pallas_scalar_from_bytes32(&payload.account_balances_root_hash.unwrap())
-                .unwrap(),
+            proto::pallas_scalar_from_bytes32(&payload.accounts_root_hash.unwrap()).unwrap(),
             utils::parse_pallas_scalar(
-                "0x3a58ebcf79758fe999e34819d451118b52ca59d7bbaadc089272bc776c9b3694"
-            )
-        );
-        assert_eq!(
-            proto::pallas_scalar_from_bytes32(&payload.staking_balances_root_hash.unwrap())
-                .unwrap(),
-            utils::parse_pallas_scalar(
-                "0x3a58ebcf79758fe999e34819d451118b52ca59d7bbaadc089272bc776c9b3694"
+                "0x2d79ad7ee66416fc6ddaabd61a1a2d597852c655652ded77128a651f1f0966b4"
             )
         );
         assert_eq!(
@@ -782,7 +705,7 @@ mod tests {
         let account_address = utils::public_key_to_wallet_address(public_key);
 
         let response = client
-            .get_account_balance(dotakon::GetAccountBalanceRequest {
+            .get_account(dotakon::GetAccountRequest {
                 account_address: Some(proto::pallas_scalar_to_bytes32(account_address)),
                 block_hash: Some(proto::pallas_scalar_to_bytes32(default_genesis_block_hash())),
             })
@@ -802,13 +725,11 @@ mod tests {
         let block_info = db::BlockInfo::decode(&payload.block_descriptor.unwrap()).unwrap();
         assert_eq!(block_info.hash(), default_genesis_block_hash());
 
-        let proof = tree::AccountBalanceProof::decode_and_verify(
-            &payload,
-            block_info.account_balances_root_hash(),
-        )
-        .unwrap();
+        let proof =
+            tree::AccountProof::decode_and_verify(&payload, block_info.accounts_root_hash())
+                .unwrap();
         assert_eq!(proof.key(), account_address);
-        assert_eq!(proof.value_as_scalar(), Scalar::ZERO);
+        assert_eq!(*proof.value(), AccountInfo::with_balance(Scalar::ZERO));
     }
 
     #[tokio::test(start_paused = true)]
@@ -820,7 +741,7 @@ mod tests {
         let account_address = utils::public_key_to_wallet_address(public_key);
 
         let response = client
-            .get_account_balance(dotakon::GetAccountBalanceRequest {
+            .get_account(dotakon::GetAccountRequest {
                 account_address: Some(proto::pallas_scalar_to_bytes32(account_address)),
                 block_hash: None,
             })
@@ -840,17 +761,15 @@ mod tests {
         let block_info = db::BlockInfo::decode(&payload.block_descriptor.unwrap()).unwrap();
         assert_eq!(block_info.hash(), default_genesis_block_hash());
 
-        let proof = tree::AccountBalanceProof::decode_and_verify(
-            &payload,
-            block_info.account_balances_root_hash(),
-        )
-        .unwrap();
+        let proof =
+            tree::AccountProof::decode_and_verify(&payload, block_info.accounts_root_hash())
+                .unwrap();
         assert_eq!(proof.key(), account_address);
-        assert_eq!(proof.value_as_scalar(), Scalar::ZERO);
+        assert_eq!(*proof.value(), AccountInfo::with_balance(Scalar::ZERO));
     }
 
     #[tokio::test(start_paused = true)]
-    async fn test_get_initial_account_balance() {
+    async fn test_get_initial_account_state() {
         let (_, public_key, _) = utils::testing_keys3();
         let account_address = utils::public_key_to_wallet_address(public_key);
 
@@ -861,7 +780,7 @@ mod tests {
         let client = &mut fixture.client;
 
         let response = client
-            .get_account_balance(dotakon::GetAccountBalanceRequest {
+            .get_account(dotakon::GetAccountRequest {
                 account_address: Some(proto::pallas_scalar_to_bytes32(account_address)),
                 block_hash: None,
             })
@@ -882,17 +801,15 @@ mod tests {
         assert_eq!(
             block_info.hash(),
             utils::parse_pallas_scalar(
-                "0x06099fdf74429c1830cb66e2e8d652facc1c15037b7613bf34622882f768ac1d"
+                "0x2ec1d893da43bd4c60f0bfe5ed512cfb5c586a75bf2fb4a8c125ab001a7a5693"
             )
         );
 
-        let proof = tree::AccountBalanceProof::decode_and_verify(
-            &payload,
-            block_info.account_balances_root_hash(),
-        )
-        .unwrap();
+        let proof =
+            tree::AccountProof::decode_and_verify(&payload, block_info.accounts_root_hash())
+                .unwrap();
         assert_eq!(proof.key(), account_address);
-        assert_eq!(proof.value_as_scalar(), Scalar::from(123));
+        assert_eq!(*proof.value(), AccountInfo::with_balance(123.into()));
     }
 
     #[tokio::test(start_paused = true)]
@@ -901,7 +818,7 @@ mod tests {
         let client = &mut fixture.client;
         assert!(
             client
-                .get_account_balance(dotakon::GetAccountBalanceRequest {
+                .get_account(dotakon::GetAccountRequest {
                     account_address: None,
                     block_hash: Some(proto::pallas_scalar_to_bytes32(default_genesis_block_hash())),
                 })
@@ -916,7 +833,7 @@ mod tests {
         let client = &mut fixture.client;
         assert!(
             client
-                .get_account_balance(dotakon::GetAccountBalanceRequest {
+                .get_account(dotakon::GetAccountRequest {
                     account_address: None,
                     block_hash: None,
                 })
@@ -1000,7 +917,7 @@ mod tests {
         assert_eq!(
             proto::pallas_scalar_from_bytes32(&payload.block_hash.unwrap()).unwrap(),
             utils::parse_pallas_scalar(
-                "0x189a0944beae1fbbaf0c8329bc3deae97ebca0c26f97af915430de721af037d5"
+                "0x0c30e58b065d0a9791504ca7e8d7c4e03207145534b79f05e7f5374e97afff30"
             )
         );
     }

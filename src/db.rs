@@ -3,7 +3,7 @@ use crate::dotakon;
 use crate::keys;
 use crate::proto;
 use crate::topology;
-use crate::tree;
+use crate::tree::{self, AccountInfo};
 use crate::utils;
 use crate::utils::PoseidonHash;
 use anyhow::{Context, Result, anyhow};
@@ -24,10 +24,8 @@ pub struct BlockInfo {
     timestamp: SystemTime,
     network_topology_root_hash: Scalar,
     last_transaction_hash: Scalar,
-    account_balances_root_hash: Scalar,
-    staking_balances_root_hash: Scalar,
+    accounts_root_hash: Scalar,
     program_storage_root_hash: Scalar,
-    account_nonces_root_hash: Scalar,
 }
 
 impl BlockInfo {
@@ -38,10 +36,8 @@ impl BlockInfo {
         timestamp: SystemTime,
         network_topology_root_hash: Scalar,
         last_transaction_hash: Scalar,
-        account_balances_root_hash: Scalar,
-        staking_balances_root_hash: Scalar,
+        accounts_root_hash: Scalar,
         program_storage_root_hash: Scalar,
-        account_nonces_root_hash: Scalar,
     ) -> Scalar {
         utils::poseidon_hash([
             Scalar::from(chain_id),
@@ -55,10 +51,8 @@ impl BlockInfo {
             ),
             network_topology_root_hash,
             last_transaction_hash,
-            account_balances_root_hash,
-            staking_balances_root_hash,
+            accounts_root_hash,
             program_storage_root_hash,
-            account_nonces_root_hash,
         ])
     }
 
@@ -69,10 +63,8 @@ impl BlockInfo {
         timestamp: SystemTime,
         network_topology_root_hash: Scalar,
         last_transaction_hash: Scalar,
-        account_balances_root_hash: Scalar,
-        staking_balances_root_hash: Scalar,
+        accounts_root_hash: Scalar,
         program_storage_root_hash: Scalar,
-        account_nonces_root_hash: Scalar,
     ) -> Self {
         Self {
             hash: Self::hash_block(
@@ -82,10 +74,8 @@ impl BlockInfo {
                 timestamp,
                 network_topology_root_hash,
                 last_transaction_hash,
-                account_balances_root_hash,
-                staking_balances_root_hash,
+                accounts_root_hash,
                 program_storage_root_hash,
-                account_nonces_root_hash,
             ),
             chain_id,
             number: block_number,
@@ -93,10 +83,8 @@ impl BlockInfo {
             timestamp,
             network_topology_root_hash,
             last_transaction_hash,
-            account_balances_root_hash,
-            staking_balances_root_hash,
+            accounts_root_hash,
             program_storage_root_hash,
-            account_nonces_root_hash,
         }
     }
 
@@ -128,20 +116,12 @@ impl BlockInfo {
         self.last_transaction_hash
     }
 
-    pub fn account_balances_root_hash(&self) -> Scalar {
-        self.account_balances_root_hash
-    }
-
-    pub fn staking_balances_root_hash(&self) -> Scalar {
-        self.staking_balances_root_hash
+    pub fn accounts_root_hash(&self) -> Scalar {
+        self.accounts_root_hash
     }
 
     pub fn program_storage_root_hash(&self) -> Scalar {
         self.program_storage_root_hash
-    }
-
-    pub fn account_nonces_root_hash(&self) -> Scalar {
-        self.account_nonces_root_hash
     }
 
     pub fn encode(&self) -> dotakon::BlockDescriptor {
@@ -157,17 +137,9 @@ impl BlockInfo {
             last_transaction_hash: Some(proto::pallas_scalar_to_bytes32(
                 self.last_transaction_hash,
             )),
-            account_balances_root_hash: Some(proto::pallas_scalar_to_bytes32(
-                self.account_balances_root_hash,
-            )),
-            staking_balances_root_hash: Some(proto::pallas_scalar_to_bytes32(
-                self.staking_balances_root_hash,
-            )),
+            accounts_root_hash: Some(proto::pallas_scalar_to_bytes32(self.accounts_root_hash)),
             program_storage_root_hash: Some(proto::pallas_scalar_to_bytes32(
                 self.program_storage_root_hash,
-            )),
-            account_nonces_root_hash: Some(proto::pallas_scalar_to_bytes32(
-                self.account_nonces_root_hash,
             )),
         }
     }
@@ -199,25 +171,15 @@ impl BlockInfo {
                 .last_transaction_hash
                 .context("last transaction hash field is missing")?,
         )?;
-        let account_balances_root_hash = proto::pallas_scalar_from_bytes32(
+        let accounts_root_hash = proto::pallas_scalar_from_bytes32(
             &proto
-                .account_balances_root_hash
+                .accounts_root_hash
                 .context("account balance root hash field is missing")?,
-        )?;
-        let staking_balances_root_hash = proto::pallas_scalar_from_bytes32(
-            &proto
-                .staking_balances_root_hash
-                .context("staking balance root hash field is missing")?,
         )?;
         let program_storage_root_hash = proto::pallas_scalar_from_bytes32(
             &proto
                 .program_storage_root_hash
                 .context("program storage root hash field is missing")?,
-        )?;
-        let account_nonces_root_hash = proto::pallas_scalar_from_bytes32(
-            &proto
-                .account_nonces_root_hash
-                .context("transaction nonces root hash field is missing")?,
         )?;
         let block_info = Self::new(
             chain_id,
@@ -226,10 +188,8 @@ impl BlockInfo {
             timestamp,
             network_topology_root_hash,
             last_transaction_hash,
-            account_balances_root_hash,
-            staking_balances_root_hash,
+            accounts_root_hash,
             program_storage_root_hash,
-            account_nonces_root_hash,
         );
         if block_hash != block_info.hash {
             Err(anyhow!("block hash mismatch"))
@@ -378,12 +338,10 @@ fn make_genesis_block(
     chain_id: u64,
     timestamp: SystemTime,
     network_topology_root_hash: Scalar,
-    account_balances_root_hash: Scalar,
-    staking_balances_root_hash: Scalar,
+    accounts_root_hash: Scalar,
 ) -> BlockInfo {
     let block_number = 0;
     let program_storage_root_hash = tree::ProgramStorageTree::default().root_hash(block_number);
-    let account_nonces_root_hash = tree::AccountNoncesTree::default().root_hash(block_number);
     BlockInfo::new(
         chain_id,
         block_number,
@@ -391,10 +349,8 @@ fn make_genesis_block(
         timestamp,
         network_topology_root_hash,
         Scalar::ZERO,
-        account_balances_root_hash,
-        staking_balances_root_hash,
+        accounts_root_hash,
         program_storage_root_hash,
-        account_nonces_root_hash,
     )
 }
 
@@ -405,10 +361,8 @@ struct Repr {
     network_topologies: BTreeMap<u64, topology::Network>,
     transactions: Vec<Transaction>,
     transactions_by_hash: BTreeMap<Scalar, usize>,
-    account_balances: tree::AccountBalanceTree,
-    staking_balances: tree::AccountBalanceTree,
+    accounts: tree::AccountTree,
     program_storage: tree::ProgramStorageTree,
-    account_nonces: tree::AccountNoncesTree,
 }
 
 impl Repr {
@@ -416,21 +370,15 @@ impl Repr {
         clock: &Arc<dyn Clock>,
         chain_id: u64,
         identity: dotakon::NodeIdentity,
-        initial_balances: [(Scalar, Scalar); N],
+        initial_accounts: [(Scalar, AccountInfo); N],
     ) -> Result<Self> {
         let network = topology::Network::new(identity)?;
-        let mut account_balances = tree::AccountBalanceTree::from(initial_balances);
-        let mut staking_balances = tree::AccountBalanceTree::default();
-        let my_address = network.get_self().account_address();
-        let stake = *account_balances.get(my_address, 0);
-        account_balances.put(my_address, Scalar::ZERO, 0);
-        staking_balances.put(my_address, stake, 0);
+        let accounts = tree::AccountTree::from(initial_accounts);
         let genesis_block = make_genesis_block(
             chain_id,
             clock.now(),
             network.root_hash(),
-            account_balances.root_hash(0),
-            staking_balances.root_hash(0),
+            accounts.root_hash(0),
         );
         Ok(Self {
             chain_id,
@@ -439,10 +387,8 @@ impl Repr {
             network_topologies: BTreeMap::from([(0, network)]),
             transactions: vec![],
             transactions_by_hash: BTreeMap::new(),
-            account_balances,
-            staking_balances,
+            accounts,
             program_storage: tree::ProgramStorageTree::default(),
-            account_nonces: tree::AccountNoncesTree::default(),
         })
     }
 
@@ -479,57 +425,28 @@ impl Repr {
         Some(self.transactions[index].clone())
     }
 
-    fn get_balance(
+    fn get_account_info(
         &self,
         account_address: Scalar,
         block_hash: Scalar,
-    ) -> Result<(BlockInfo, tree::AccountBalanceProof)> {
+    ) -> Result<(BlockInfo, tree::AccountProof)> {
         match self.get_block_by_hash(block_hash) {
             Some(block) => Ok((
                 block,
-                self.account_balances
-                    .get_proof(account_address, block.number),
+                self.accounts.get_proof(account_address, block.number),
             )),
             None => Err(anyhow!("block not found")),
         }
     }
 
-    fn get_latest_balance(
+    fn get_latest_account_info(
         &self,
         account_address: Scalar,
-    ) -> Result<(BlockInfo, tree::AccountBalanceProof)> {
+    ) -> Result<(BlockInfo, tree::AccountProof)> {
         let block = self.get_latest_block();
         Ok((
             block,
-            self.account_balances
-                .get_proof(account_address, block.number),
-        ))
-    }
-
-    fn get_staking_balance(
-        &self,
-        account_address: Scalar,
-        block_hash: Scalar,
-    ) -> Result<(BlockInfo, tree::AccountBalanceProof)> {
-        match self.get_block_by_hash(block_hash) {
-            Some(block) => Ok((
-                block,
-                self.staking_balances
-                    .get_proof(account_address, block.number),
-            )),
-            None => Err(anyhow!("block not found")),
-        }
-    }
-
-    fn get_latest_staking_balance(
-        &self,
-        account_address: Scalar,
-    ) -> Result<(BlockInfo, tree::AccountBalanceProof)> {
-        let block = self.get_latest_block();
-        Ok((
-            block,
-            self.staking_balances
-                .get_proof(account_address, block.number),
+            self.accounts.get_proof(account_address, block.number),
         ))
     }
 
@@ -549,18 +466,21 @@ impl Repr {
                 .amount
                 .context("invalid coin transfer transaction payload: missing amount")?,
         )?;
-        let sender_balance = *self.account_balances.get(signer, version);
+        let mut signer_account = *self.accounts.get(signer, version);
+        let sender_balance = signer_account.balance;
         if sender_balance < amount {
             return Err(anyhow!(
-                "insufficient balance for {:#x}",
-                utils::pallas_scalar_to_u256(signer)
+                "insufficient balance for {:#x}: {} available, cannot transfer {}",
+                utils::pallas_scalar_to_u256(signer),
+                utils::pallas_scalar_to_u256(sender_balance),
+                utils::pallas_scalar_to_u256(amount),
             ));
         }
-        self.account_balances
-            .put(signer, sender_balance - amount, version);
-        let recipient_balance = *self.account_balances.get(recipient, version);
-        self.account_balances
-            .put(recipient, recipient_balance + amount, version);
+        signer_account.balance -= amount;
+        self.accounts.put(signer, signer_account, version);
+        let mut recipient_account = *self.accounts.get(recipient, version);
+        recipient_account.balance += amount;
+        self.accounts.put(recipient, recipient_account, version);
         Ok(())
     }
 
@@ -576,13 +496,13 @@ impl Repr {
         }
         let block_number = self.current_version();
         let nonce = payload.nonce();
-        let latest_nonce = *self.account_nonces.get(signer, block_number);
-        if nonce <= latest_nonce {
+        let signer_account = *self.accounts.get(signer, block_number);
+        if nonce <= signer_account.last_nonce {
             return Err(anyhow!(
                 "invalid nonce {} (latest for {:#x} is {})",
                 nonce,
                 utils::pallas_scalar_to_u256(signer),
-                latest_nonce,
+                signer_account.last_nonce,
             ));
         }
         match &payload.transaction {
@@ -590,11 +510,13 @@ impl Repr {
                 self.apply_send_coins_transaction(signer, payload)
             }
             Some(dotakon::transaction::payload::Transaction::CreateProgram(_)) => {
-                unimplemented!()
+                todo!()
             }
             None => Err(anyhow!("invalid transaction payload")),
         }?;
-        self.account_nonces.put(signer, nonce, block_number);
+        let mut signer_account = *self.accounts.get(signer, block_number);
+        signer_account.last_nonce = nonce;
+        self.accounts.put(signer, signer_account, block_number);
         Ok(())
     }
 
@@ -624,10 +546,8 @@ impl Repr {
             Some(transaction) => transaction.hash(),
             None => Scalar::ZERO,
         };
-        let account_balances_root_hash = self.account_balances.root_hash(block_number);
-        let staking_balances_root_hash = self.staking_balances.root_hash(block_number);
+        let accounts_root_hash = self.accounts.root_hash(block_number);
         let program_storage_root_hash = self.program_storage.root_hash(block_number);
-        let account_nonces_root_hash = self.account_nonces.root_hash(block_number);
         let block = BlockInfo::new(
             self.chain_id,
             block_number,
@@ -635,10 +555,8 @@ impl Repr {
             timestamp,
             network_topology.root_hash(),
             last_transaction_hash,
-            account_balances_root_hash,
-            staking_balances_root_hash,
+            accounts_root_hash,
             program_storage_root_hash,
-            account_nonces_root_hash,
         );
         let block_hash = block.hash();
         self.blocks.push(block);
@@ -658,9 +576,9 @@ impl Db {
         clock: Arc<dyn Clock>,
         chain_id: u64,
         identity: dotakon::NodeIdentity,
-        initial_balances: [(Scalar, Scalar); N],
+        initial_accounts: [(Scalar, AccountInfo); N],
     ) -> Result<Self> {
-        let repr = Repr::new(&clock, chain_id, identity, initial_balances)?;
+        let repr = Repr::new(&clock, chain_id, identity, initial_accounts)?;
         Ok(Self {
             clock,
             repr: Mutex::new(repr),
@@ -687,47 +605,29 @@ impl Db {
         self.repr.lock().await.get_latest_block()
     }
 
+    pub async fn get_account_info(
+        &self,
+        account_address: Scalar,
+        block_hash: Scalar,
+    ) -> Result<(BlockInfo, tree::AccountProof)> {
+        self.repr
+            .lock()
+            .await
+            .get_account_info(account_address, block_hash)
+    }
+
+    pub async fn get_latest_account_info(
+        &self,
+        account_address: Scalar,
+    ) -> Result<(BlockInfo, tree::AccountProof)> {
+        self.repr
+            .lock()
+            .await
+            .get_latest_account_info(account_address)
+    }
+
     pub async fn get_transaction(&self, hash: Scalar) -> Option<Transaction> {
         self.repr.lock().await.get_transaction(hash)
-    }
-
-    pub async fn get_balance(
-        &self,
-        account_address: Scalar,
-        block_hash: Scalar,
-    ) -> Result<(BlockInfo, tree::AccountBalanceProof)> {
-        self.repr
-            .lock()
-            .await
-            .get_balance(account_address, block_hash)
-    }
-
-    pub async fn get_latest_balance(
-        &self,
-        account_address: Scalar,
-    ) -> Result<(BlockInfo, tree::AccountBalanceProof)> {
-        self.repr.lock().await.get_latest_balance(account_address)
-    }
-
-    pub async fn get_staking_balance(
-        &self,
-        account_address: Scalar,
-        block_hash: Scalar,
-    ) -> Result<(BlockInfo, tree::AccountBalanceProof)> {
-        self.repr
-            .lock()
-            .await
-            .get_staking_balance(account_address, block_hash)
-    }
-
-    pub async fn get_latest_staking_balance(
-        &self,
-        account_address: Scalar,
-    ) -> Result<(BlockInfo, tree::AccountBalanceProof)> {
-        self.repr
-            .lock()
-            .await
-            .get_latest_staking_balance(account_address)
     }
 
     pub async fn add_transaction(&self, transaction: &dotakon::Transaction) -> Result<Scalar> {
@@ -745,7 +645,7 @@ mod tests {
     use super::*;
     use crate::clock::test::MockClock;
     use crate::keys;
-    use crate::tree::AccountBalanceTree;
+    use crate::tree::AccountTree;
     use crate::utils;
     use crate::version;
     use ff::PrimeField;
@@ -801,7 +701,7 @@ mod tests {
 
     fn default_genesis_block_hash() -> Scalar {
         utils::u256_to_pallas_scalar(
-            "0x1fd648f9346ee50789d7abed3554e70990c0c180ad00d0d0228066d6e072d794"
+            "0x279760377f1ebc7931e1804663b301f687630a6144947353b710ed811bfcb2c5"
                 .parse()
                 .unwrap(),
         )
@@ -826,24 +726,14 @@ mod tests {
             10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0,
         ])
         .unwrap();
-        let account_balances_root_hash = Scalar::from_repr_vartime([
+        let accounts_root_hash = Scalar::from_repr_vartime([
             25u8, 26, 27, 28, 29, 30, 31, 32, 17, 18, 19, 20, 21, 22, 23, 24, 9, 10, 11, 12, 13,
             14, 15, 16, 1, 2, 3, 4, 5, 6, 7, 0,
-        ])
-        .unwrap();
-        let staking_balances_root_hash = Scalar::from_repr_vartime([
-            1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 15, 14, 13, 12, 11, 10, 9, 8,
-            7, 6, 5, 4, 3, 2, 1, 0,
         ])
         .unwrap();
         let program_storage_root_hash = Scalar::from_repr_vartime([
             8u8, 7, 6, 5, 4, 3, 2, 1, 16, 15, 14, 13, 12, 11, 10, 9, 8, 9, 10, 11, 12, 13, 14, 15,
             1, 2, 3, 4, 5, 6, 7, 0,
-        ])
-        .unwrap();
-        let account_nonces_root_hash = Scalar::from_repr_vartime([
-            16u8, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
-            11, 12, 13, 14, 15, 16, 0,
         ])
         .unwrap();
         let block = BlockInfo::new(
@@ -853,10 +743,8 @@ mod tests {
             timestamp,
             network_topology_root_hash,
             last_transaction_hash,
-            account_balances_root_hash,
-            staking_balances_root_hash,
+            accounts_root_hash,
             program_storage_root_hash,
-            account_nonces_root_hash,
         );
         assert_ne!(
             block,
@@ -864,14 +752,13 @@ mod tests {
                 TEST_CHAIN_ID,
                 timestamp,
                 network_topology_root_hash,
-                account_balances_root_hash,
-                staking_balances_root_hash,
+                accounts_root_hash,
             )
         );
         assert_eq!(
             block.hash(),
             utils::parse_pallas_scalar(
-                "0x1ac5468d59d1429ee45174ef07c8b6cdf441545809164b8bdc8bb8163d26b009"
+                "0x19f4ce9db0c9abead289f959cbec514cc04b71d867870dc87157c21b4fe66e80"
             )
         );
         assert_eq!(block.chain_id(), TEST_CHAIN_ID);
@@ -883,16 +770,8 @@ mod tests {
             network_topology_root_hash
         );
         assert_eq!(block.last_transaction_hash(), last_transaction_hash);
-        assert_eq!(
-            block.account_balances_root_hash(),
-            account_balances_root_hash
-        );
-        assert_eq!(
-            block.staking_balances_root_hash(),
-            staking_balances_root_hash
-        );
+        assert_eq!(block.accounts_root_hash(), accounts_root_hash);
         assert_eq!(block.program_storage_root_hash(), program_storage_root_hash);
-        assert_eq!(block.account_nonces_root_hash(), account_nonces_root_hash);
         assert_eq!(BlockInfo::decode(&block.encode()).unwrap(), block);
     }
 
@@ -900,14 +779,12 @@ mod tests {
     fn test_genesis_block() {
         let timestamp = SystemTime::UNIX_EPOCH + Duration::from_secs(71104);
         let network = topology::Network::new(testing_identity()).unwrap();
-        let account_balances = AccountBalanceTree::from([]);
-        let staking_balances = AccountBalanceTree::from([]);
+        let accounts = AccountTree::from([]);
         let block = make_genesis_block(
             TEST_CHAIN_ID,
             timestamp,
             network.root_hash(),
-            account_balances.root_hash(0),
-            staking_balances.root_hash(0),
+            accounts.root_hash(0),
         );
         assert_eq!(block.hash(), default_genesis_block_hash());
         assert_eq!(block.chain_id(), TEST_CHAIN_ID);
@@ -917,27 +794,15 @@ mod tests {
         assert_eq!(block.network_topology_root_hash(), network.root_hash());
         assert_eq!(block.last_transaction_hash(), Scalar::ZERO);
         assert_eq!(
-            block.account_balances_root_hash(),
+            block.accounts_root_hash(),
             utils::parse_pallas_scalar(
-                "0x3a58ebcf79758fe999e34819d451118b52ca59d7bbaadc089272bc776c9b3694"
-            )
-        );
-        assert_eq!(
-            block.staking_balances_root_hash(),
-            utils::parse_pallas_scalar(
-                "0x3a58ebcf79758fe999e34819d451118b52ca59d7bbaadc089272bc776c9b3694"
+                "0x2d79ad7ee66416fc6ddaabd61a1a2d597852c655652ded77128a651f1f0966b4"
             )
         );
         assert_eq!(
             block.program_storage_root_hash(),
             utils::parse_pallas_scalar(
                 "0x297401934d5cc4d84e639092ccb6f336faae9fc1c54cd4e23ef2561f8c63f683"
-            )
-        );
-        assert_eq!(
-            block.account_nonces_root_hash(),
-            utils::parse_pallas_scalar(
-                "0x3a58ebcf79758fe999e34819d451118b52ca59d7bbaadc089272bc776c9b3694"
             )
         );
         assert_eq!(BlockInfo::decode(&block.encode()).unwrap(), block);
@@ -1228,63 +1093,32 @@ mod tests {
         );
     }
 
-    async fn test_initial_balance(public_key: Point) {
+    async fn test_initial_account_state(public_key: Point) {
         let clock = mock_clock(SystemTime::UNIX_EPOCH + Duration::from_secs(71104));
         let db = Db::new(clock, TEST_CHAIN_ID, testing_identity(), []).unwrap();
         let account_address = utils::public_key_to_wallet_address(public_key);
-        let (block, proof) = db.get_latest_balance(account_address).await.unwrap();
+        let (block, proof) = db.get_latest_account_info(account_address).await.unwrap();
         assert_eq!(block.hash(), default_genesis_block_hash());
         assert_eq!(proof.key(), account_address);
-        assert_eq!(proof.value_as_scalar(), Scalar::ZERO);
+        assert_eq!(*proof.value(), AccountInfo::default());
     }
 
     #[tokio::test]
-    async fn test_initial_balance1() {
+    async fn test_initial_account_state1() {
         let (_, public_key, _) = utils::testing_keys1();
-        test_initial_balance(public_key).await;
+        test_initial_account_state(public_key).await;
     }
 
     #[tokio::test]
-    async fn test_initial_balance2() {
+    async fn test_initial_account_state2() {
         let (_, public_key, _) = utils::testing_keys2();
-        test_initial_balance(public_key).await;
+        test_initial_account_state(public_key).await;
     }
 
     #[tokio::test]
-    async fn test_initial_balance3() {
+    async fn test_initial_account_state3() {
         let (_, public_key, _) = utils::testing_keys3();
-        test_initial_balance(public_key).await;
-    }
-
-    async fn test_initial_staking_balance(public_key: Point) {
-        let clock = mock_clock(SystemTime::UNIX_EPOCH + Duration::from_secs(71104));
-        let db = Db::new(clock, TEST_CHAIN_ID, testing_identity(), []).unwrap();
-        let account_address = utils::public_key_to_wallet_address(public_key);
-        let (block, proof) = db
-            .get_latest_staking_balance(account_address)
-            .await
-            .unwrap();
-        assert_eq!(block.hash(), default_genesis_block_hash());
-        assert_eq!(proof.key(), account_address);
-        assert_eq!(proof.value_as_scalar(), Scalar::ZERO);
-    }
-
-    #[tokio::test]
-    async fn test_initial_staking_balance1() {
-        let (_, public_key, _) = utils::testing_keys1();
-        test_initial_staking_balance(public_key).await;
-    }
-
-    #[tokio::test]
-    async fn test_initial_staking_balance2() {
-        let (_, public_key, _) = utils::testing_keys2();
-        test_initial_staking_balance(public_key).await;
-    }
-
-    #[tokio::test]
-    async fn test_initial_staking_balance3() {
-        let (_, public_key, _) = utils::testing_keys3();
-        test_initial_staking_balance(public_key).await;
+        test_initial_account_state(public_key).await;
     }
 
     async fn test_balance_at_first_version(public_key: Point) {
@@ -1292,12 +1126,12 @@ mod tests {
         let db = Db::new(clock, TEST_CHAIN_ID, testing_identity(), []).unwrap();
         let account_address = utils::public_key_to_wallet_address(public_key);
         let (block, proof) = db
-            .get_balance(account_address, default_genesis_block_hash())
+            .get_account_info(account_address, default_genesis_block_hash())
             .await
             .unwrap();
         assert_eq!(block.hash(), default_genesis_block_hash());
         assert_eq!(proof.key(), account_address);
-        assert_eq!(proof.value_as_scalar(), Scalar::ZERO);
+        assert_eq!(*proof.value(), AccountInfo::default());
     }
 
     #[tokio::test]
@@ -1312,39 +1146,8 @@ mod tests {
         test_balance_at_first_version(public_key).await;
     }
 
-    async fn test_staking_balance_at_first_version(public_key: Point) {
-        let clock = mock_clock(SystemTime::UNIX_EPOCH + Duration::from_secs(71104));
-        let db = Db::new(clock, TEST_CHAIN_ID, testing_identity(), []).unwrap();
-        let account_address = utils::public_key_to_wallet_address(public_key);
-        let (block, proof) = db
-            .get_staking_balance(account_address, default_genesis_block_hash())
-            .await
-            .unwrap();
-        assert_eq!(block.hash(), default_genesis_block_hash());
-        assert_eq!(proof.key(), account_address);
-        assert_eq!(proof.value_as_scalar(), Scalar::ZERO);
-    }
-
     #[tokio::test]
-    async fn test_staking_balance_at_first_version1() {
-        let (_, public_key, _) = utils::testing_keys1();
-        test_staking_balance_at_first_version(public_key).await;
-    }
-
-    #[tokio::test]
-    async fn test_staking_balance_at_first_version2() {
-        let (_, public_key, _) = utils::testing_keys2();
-        test_staking_balance_at_first_version(public_key).await;
-    }
-
-    #[tokio::test]
-    async fn test_staking_balance_at_first_version3() {
-        let (_, public_key, _) = utils::testing_keys3();
-        test_staking_balance_at_first_version(public_key).await;
-    }
-
-    #[tokio::test]
-    async fn test_nonzero_initial_staking_balance() {
+    async fn test_non_default_initial_account_state() {
         let clock = mock_clock(SystemTime::UNIX_EPOCH + Duration::from_secs(71104));
         let (_, public_key1, _) = utils::testing_keys1();
         let account_address1 = utils::public_key_to_wallet_address(public_key1);
@@ -1352,44 +1155,40 @@ mod tests {
         let account_address2 = utils::public_key_to_wallet_address(public_key2);
         let (_, public_key3, _) = utils::testing_keys3();
         let account_address3 = utils::public_key_to_wallet_address(public_key3);
+        let account = AccountInfo {
+            last_nonce: 0,
+            balance: Scalar::from(30),
+            staking_balance: Scalar::from(100),
+        };
         let db = Db::new(
             clock,
             TEST_CHAIN_ID,
             testing_identity(),
             [
-                (account_address1, Scalar::from(100)),
-                (account_address2, Scalar::from(42)),
+                (account_address1, account),
+                (account_address2, AccountInfo::with_balance(42.into())),
             ],
         )
         .unwrap();
         let block_hash = utils::parse_pallas_scalar(
-            "0x0a495ef194ce702e89d4794aa2ffc4bd03c1ae4c53503102716ea9fa55422311",
+            "0x27f5f8875564ea3039c1c2a672a01787ecb3e708ff0ffbd155f0565b35fda999",
         );
-        let (block, proof) = db
-            .get_latest_staking_balance(account_address1)
-            .await
-            .unwrap();
+        let (block, proof) = db.get_latest_account_info(account_address1).await.unwrap();
         assert_eq!(block.hash(), block_hash);
         assert_eq!(proof.key(), account_address1);
-        assert_eq!(proof.value_as_scalar(), Scalar::from(100));
-        let (block, proof) = db
-            .get_latest_staking_balance(account_address2)
-            .await
-            .unwrap();
+        assert_eq!(*proof.value(), account);
+        let (block, proof) = db.get_latest_account_info(account_address2).await.unwrap();
         assert_eq!(block.hash(), block_hash);
         assert_eq!(proof.key(), account_address2);
-        assert_eq!(proof.value_as_scalar(), Scalar::ZERO);
-        let (block, proof) = db
-            .get_latest_staking_balance(account_address3)
-            .await
-            .unwrap();
+        assert_eq!(*proof.value(), AccountInfo::with_balance(42.into()));
+        let (block, proof) = db.get_latest_account_info(account_address3).await.unwrap();
         assert_eq!(block.hash(), block_hash);
         assert_eq!(proof.key(), account_address3);
-        assert_eq!(proof.value_as_scalar(), Scalar::ZERO);
+        assert_eq!(*proof.value(), AccountInfo::default());
     }
 
     #[tokio::test]
-    async fn test_nonzero_staking_balance_at_first_version() {
+    async fn test_non_default_account_state_at_first_version() {
         let clock = mock_clock(SystemTime::UNIX_EPOCH + Duration::from_secs(71104));
         let (_, public_key1, _) = utils::testing_keys1();
         let account_address1 = utils::public_key_to_wallet_address(public_key1);
@@ -1397,76 +1196,45 @@ mod tests {
         let account_address2 = utils::public_key_to_wallet_address(public_key2);
         let (_, public_key3, _) = utils::testing_keys3();
         let account_address3 = utils::public_key_to_wallet_address(public_key3);
+        let account = AccountInfo {
+            last_nonce: 0,
+            balance: Scalar::from(30),
+            staking_balance: Scalar::from(100),
+        };
         let db = Db::new(
             clock,
             TEST_CHAIN_ID,
             testing_identity(),
             [
-                (account_address1, Scalar::from(100)),
-                (account_address2, Scalar::from(42)),
+                (account_address1, account),
+                (account_address2, AccountInfo::with_balance(42.into())),
             ],
         )
         .unwrap();
         let block_hash = utils::parse_pallas_scalar(
-            "0x0a495ef194ce702e89d4794aa2ffc4bd03c1ae4c53503102716ea9fa55422311",
+            "0x27f5f8875564ea3039c1c2a672a01787ecb3e708ff0ffbd155f0565b35fda999",
         );
         let (block, proof) = db
-            .get_staking_balance(account_address1, block_hash)
+            .get_account_info(account_address1, block_hash)
             .await
             .unwrap();
         assert_eq!(block.hash(), block_hash);
         assert_eq!(proof.key(), account_address1);
-        assert_eq!(proof.value_as_scalar(), Scalar::from(100));
+        assert_eq!(*proof.value(), account);
         let (block, proof) = db
-            .get_staking_balance(account_address2, block_hash)
+            .get_account_info(account_address2, block_hash)
             .await
             .unwrap();
         assert_eq!(block.hash(), block_hash);
         assert_eq!(proof.key(), account_address2);
-        assert_eq!(proof.value_as_scalar(), Scalar::ZERO);
+        assert_eq!(*proof.value(), AccountInfo::with_balance(42.into()));
         let (block, proof) = db
-            .get_staking_balance(account_address3, block_hash)
+            .get_account_info(account_address3, block_hash)
             .await
             .unwrap();
         assert_eq!(block.hash(), block_hash);
         assert_eq!(proof.key(), account_address3);
-        assert_eq!(proof.value_as_scalar(), Scalar::ZERO);
-    }
-
-    #[tokio::test]
-    async fn test_initial_balances_with_stake() {
-        let clock = mock_clock(SystemTime::UNIX_EPOCH + Duration::from_secs(71104));
-        let (_, public_key1, _) = utils::testing_keys1();
-        let account_address1 = utils::public_key_to_wallet_address(public_key1);
-        let (_, public_key2, _) = utils::testing_keys2();
-        let account_address2 = utils::public_key_to_wallet_address(public_key2);
-        let (_, public_key3, _) = utils::testing_keys3();
-        let account_address3 = utils::public_key_to_wallet_address(public_key3);
-        let db = Db::new(
-            clock,
-            TEST_CHAIN_ID,
-            testing_identity(),
-            [
-                (account_address1, Scalar::from(100)),
-                (account_address2, Scalar::from(42)),
-            ],
-        )
-        .unwrap();
-        let block_hash = utils::parse_pallas_scalar(
-            "0x0a495ef194ce702e89d4794aa2ffc4bd03c1ae4c53503102716ea9fa55422311",
-        );
-        let (block, proof) = db.get_latest_balance(account_address1).await.unwrap();
-        assert_eq!(block.hash(), block_hash);
-        assert_eq!(proof.key(), account_address1);
-        assert_eq!(proof.value_as_scalar(), Scalar::ZERO);
-        let (block, proof) = db.get_latest_balance(account_address2).await.unwrap();
-        assert_eq!(block.hash(), block_hash);
-        assert_eq!(proof.key(), account_address2);
-        assert_eq!(proof.value_as_scalar(), Scalar::from(42));
-        let (block, proof) = db.get_latest_balance(account_address3).await.unwrap();
-        assert_eq!(block.hash(), block_hash);
-        assert_eq!(proof.key(), account_address3);
-        assert_eq!(proof.value_as_scalar(), Scalar::ZERO);
+        assert_eq!(*proof.value(), AccountInfo::default());
     }
 
     #[tokio::test]
@@ -1480,27 +1248,28 @@ mod tests {
             clock,
             TEST_CHAIN_ID,
             testing_identity(),
-            [(address1, Scalar::from(321)), (address2, Scalar::from(100))],
+            [
+                (address1, AccountInfo::with_balance(321.into())),
+                (address2, AccountInfo::with_balance(100.into())),
+            ],
         )
         .unwrap();
         let block_hash1 = db.get_latest_block().await.hash();
-        assert_eq!(
-            db.close_block().await.hash(),
-            utils::parse_pallas_scalar(
-                "0x15e4ec5a04b7f9b7a09dea467b4dc9ce4f2d57ff9993a46b4e1c617695c49211"
-            )
+        let block_hash2 = utils::parse_pallas_scalar(
+            "0x048aefa6cb901d8d75edc9648c6c540efcc037e5effbd0b369b22aacfd6665b7",
         );
-        assert_eq!(db.current_version().await, 2);
-        let block_hash2 = db.get_latest_block().await.hash();
         assert_ne!(block_hash1, block_hash2);
-        let (_, proof) = db.get_balance(address1, block_hash1).await.unwrap();
-        assert_eq!(proof.value_as_scalar(), Scalar::from(321));
-        let (_, proof) = db.get_balance(address2, block_hash1).await.unwrap();
-        assert_eq!(proof.value_as_scalar(), Scalar::from(100));
-        let (_, proof) = db.get_balance(address1, block_hash2).await.unwrap();
-        assert_eq!(proof.value_as_scalar(), Scalar::from(321));
-        let (_, proof) = db.get_balance(address2, block_hash2).await.unwrap();
-        assert_eq!(proof.value_as_scalar(), Scalar::from(100));
+        assert_eq!(db.close_block().await.hash(), block_hash2);
+        assert_eq!(db.current_version().await, 2);
+        assert_ne!(block_hash1, block_hash2);
+        let (_, proof) = db.get_account_info(address1, block_hash1).await.unwrap();
+        assert_eq!(*proof.value(), AccountInfo::with_balance(321.into()));
+        let (_, proof) = db.get_account_info(address2, block_hash1).await.unwrap();
+        assert_eq!(*proof.value(), AccountInfo::with_balance(100.into()));
+        let (_, proof) = db.get_account_info(address1, block_hash2).await.unwrap();
+        assert_eq!(*proof.value(), AccountInfo::with_balance(321.into()));
+        let (_, proof) = db.get_account_info(address2, block_hash2).await.unwrap();
+        assert_eq!(*proof.value(), AccountInfo::with_balance(100.into()));
     }
 
     #[tokio::test]
@@ -1515,7 +1284,10 @@ mod tests {
             clock,
             TEST_CHAIN_ID,
             testing_identity(),
-            [(address1, Scalar::from(321)), (address2, Scalar::from(100))],
+            [
+                (address1, AccountInfo::with_balance(321.into())),
+                (address2, AccountInfo::with_balance(100.into())),
+            ],
         )
         .unwrap();
         assert!(
@@ -1529,7 +1301,7 @@ mod tests {
                     TEST_CHAIN_ID,
                     1,
                     address2,
-                    Scalar::from(123)
+                    123.into(),
                 )
                 .unwrap()
             )
@@ -1537,22 +1309,27 @@ mod tests {
             .is_ok()
         );
         let block_hash1 = db.get_latest_block().await.hash();
-        assert_eq!(
-            db.close_block().await.hash(),
-            utils::parse_pallas_scalar(
-                "0x195c523157e77ff787b11c382d04f86dd246439ef8a2527b924f619ee68f989a"
-            )
+        let block_hash2 = utils::parse_pallas_scalar(
+            "0x0230ccdd73f27af7c1b79abae35e9de76adc56beb6f2a0e1609a7bd82df9c3a2",
         );
+        assert_ne!(block_hash1, block_hash2);
+        assert_eq!(db.close_block().await.hash(), block_hash2);
         assert_eq!(db.current_version().await, 2);
-        let block_hash2 = db.get_latest_block().await.hash();
-        let (_, proof) = db.get_balance(address1, block_hash1).await.unwrap();
-        assert_eq!(proof.value_as_scalar(), Scalar::from(321));
-        let (_, proof) = db.get_balance(address2, block_hash1).await.unwrap();
-        assert_eq!(proof.value_as_scalar(), Scalar::from(100));
-        let (_, proof) = db.get_balance(address1, block_hash2).await.unwrap();
-        assert_eq!(proof.value_as_scalar(), Scalar::from(198));
-        let (_, proof) = db.get_balance(address2, block_hash2).await.unwrap();
-        assert_eq!(proof.value_as_scalar(), Scalar::from(223));
+        let (_, proof) = db.get_account_info(address1, block_hash1).await.unwrap();
+        assert_eq!(*proof.value(), AccountInfo::with_balance(321.into()));
+        let (_, proof) = db.get_account_info(address2, block_hash1).await.unwrap();
+        assert_eq!(*proof.value(), AccountInfo::with_balance(100.into()));
+        let (_, proof) = db.get_account_info(address1, block_hash2).await.unwrap();
+        assert_eq!(
+            *proof.value(),
+            AccountInfo {
+                last_nonce: 1,
+                balance: 198.into(),
+                staking_balance: Scalar::ZERO,
+            }
+        );
+        let (_, proof) = db.get_account_info(address2, block_hash2).await.unwrap();
+        assert_eq!(*proof.value(), AccountInfo::with_balance(223.into()));
     }
 
     #[tokio::test]
@@ -1568,7 +1345,10 @@ mod tests {
             clock,
             TEST_CHAIN_ID,
             testing_identity(),
-            [(address1, Scalar::from(321)), (address2, Scalar::from(100))],
+            [
+                (address1, AccountInfo::with_balance(321.into())),
+                (address2, AccountInfo::with_balance(100.into())),
+            ],
         )
         .unwrap();
         let nonce = H256::from_slice(&[
@@ -1583,7 +1363,7 @@ mod tests {
                     TEST_CHAIN_ID,
                     1,
                     address2,
-                    Scalar::from(123)
+                    123.into(),
                 )
                 .unwrap()
             )
@@ -1598,7 +1378,7 @@ mod tests {
                     TEST_CHAIN_ID,
                     1,
                     address1,
-                    Scalar::from(42)
+                    42.into(),
                 )
                 .unwrap()
             )
@@ -1606,22 +1386,33 @@ mod tests {
             .is_ok()
         );
         let block_hash1 = db.get_latest_block().await.hash();
-        assert_eq!(
-            db.close_block().await.hash(),
-            utils::parse_pallas_scalar(
-                "0x13bf314f5ad4a4483046e841e6b98e53f009070d4331b91bac90735eacc42086"
-            )
+        let block_hash2 = utils::parse_pallas_scalar(
+            "0x156825c978a11fa86406aa9ea2be248b837613a033eb570bf10e23e0b4a6d031",
         );
+        assert_eq!(db.close_block().await.hash(), block_hash2);
         assert_eq!(db.current_version().await, 2);
-        let block_hash2 = db.get_latest_block().await.hash();
-        let (_, proof) = db.get_balance(address1, block_hash1).await.unwrap();
-        assert_eq!(proof.value_as_scalar(), Scalar::from(321));
-        let (_, proof) = db.get_balance(address2, block_hash1).await.unwrap();
-        assert_eq!(proof.value_as_scalar(), Scalar::from(100));
-        let (_, proof) = db.get_balance(address1, block_hash2).await.unwrap();
-        assert_eq!(proof.value_as_scalar(), Scalar::from(240));
-        let (_, proof) = db.get_balance(address2, block_hash2).await.unwrap();
-        assert_eq!(proof.value_as_scalar(), Scalar::from(181));
+        let (_, proof) = db.get_account_info(address1, block_hash1).await.unwrap();
+        assert_eq!(*proof.value(), AccountInfo::with_balance(321.into()));
+        let (_, proof) = db.get_account_info(address2, block_hash1).await.unwrap();
+        assert_eq!(*proof.value(), AccountInfo::with_balance(100.into()));
+        let (_, proof) = db.get_account_info(address1, block_hash2).await.unwrap();
+        assert_eq!(
+            *proof.value(),
+            AccountInfo {
+                last_nonce: 1,
+                balance: 240.into(),
+                staking_balance: Scalar::ZERO,
+            }
+        );
+        let (_, proof) = db.get_account_info(address2, block_hash2).await.unwrap();
+        assert_eq!(
+            *proof.value(),
+            AccountInfo {
+                last_nonce: 1,
+                balance: 181.into(),
+                staking_balance: Scalar::ZERO,
+            }
+        );
     }
 
     #[tokio::test]
@@ -1636,7 +1427,10 @@ mod tests {
             clock,
             TEST_CHAIN_ID,
             testing_identity(),
-            [(address1, Scalar::from(321)), (address2, Scalar::from(100))],
+            [
+                (address1, AccountInfo::with_balance(321.into())),
+                (address2, AccountInfo::with_balance(100.into())),
+            ],
         )
         .unwrap();
         assert!(
@@ -1650,7 +1444,7 @@ mod tests {
                     TEST_CHAIN_ID + 1,
                     1,
                     address2,
-                    Scalar::from(123)
+                    123.into(),
                 )
                 .unwrap()
             )
@@ -1658,22 +1452,19 @@ mod tests {
             .is_err()
         );
         let block_hash1 = db.get_latest_block().await.hash();
-        assert_eq!(
-            db.close_block().await.hash(),
-            utils::parse_pallas_scalar(
-                "0x15e4ec5a04b7f9b7a09dea467b4dc9ce4f2d57ff9993a46b4e1c617695c49211"
-            )
+        let block_hash2 = utils::parse_pallas_scalar(
+            "0x048aefa6cb901d8d75edc9648c6c540efcc037e5effbd0b369b22aacfd6665b7",
         );
+        assert_eq!(db.close_block().await.hash(), block_hash2);
         assert_eq!(db.current_version().await, 2);
-        let block_hash2 = db.get_latest_block().await.hash();
-        let (_, proof) = db.get_balance(address1, block_hash1).await.unwrap();
-        assert_eq!(proof.value_as_scalar(), Scalar::from(321));
-        let (_, proof) = db.get_balance(address2, block_hash1).await.unwrap();
-        assert_eq!(proof.value_as_scalar(), Scalar::from(100));
-        let (_, proof) = db.get_balance(address1, block_hash2).await.unwrap();
-        assert_eq!(proof.value_as_scalar(), Scalar::from(321));
-        let (_, proof) = db.get_balance(address2, block_hash2).await.unwrap();
-        assert_eq!(proof.value_as_scalar(), Scalar::from(100));
+        let (_, proof) = db.get_account_info(address1, block_hash1).await.unwrap();
+        assert_eq!(*proof.value(), AccountInfo::with_balance(321.into()));
+        let (_, proof) = db.get_account_info(address2, block_hash1).await.unwrap();
+        assert_eq!(*proof.value(), AccountInfo::with_balance(100.into()));
+        let (_, proof) = db.get_account_info(address1, block_hash2).await.unwrap();
+        assert_eq!(*proof.value(), AccountInfo::with_balance(321.into()));
+        let (_, proof) = db.get_account_info(address2, block_hash2).await.unwrap();
+        assert_eq!(*proof.value(), AccountInfo::with_balance(100.into()));
     }
 
     #[tokio::test]
@@ -1688,7 +1479,10 @@ mod tests {
             clock,
             TEST_CHAIN_ID,
             testing_identity(),
-            [(address1, Scalar::from(321)), (address2, Scalar::from(100))],
+            [
+                (address1, AccountInfo::with_balance(321.into())),
+                (address2, AccountInfo::with_balance(100.into())),
+            ],
         )
         .unwrap();
         let signature_nonce = H256::from_slice(&[
@@ -1703,7 +1497,7 @@ mod tests {
                     TEST_CHAIN_ID,
                     10,
                     address2,
-                    Scalar::from(123)
+                    123.into(),
                 )
                 .unwrap()
             )
@@ -1718,7 +1512,7 @@ mod tests {
                     TEST_CHAIN_ID,
                     9,
                     address2,
-                    Scalar::from(123)
+                    123.into(),
                 )
                 .unwrap()
             )
@@ -1726,22 +1520,26 @@ mod tests {
             .is_err()
         );
         let block_hash1 = db.get_latest_block().await.hash();
-        assert_eq!(
-            db.close_block().await.hash(),
-            utils::parse_pallas_scalar(
-                "0x3a8f5a988eb534c4cc5f96bf048db0c6afc6e84d4080838546b33b7d754e2095"
-            )
+        let block_hash2 = utils::parse_pallas_scalar(
+            "0x2322760adbcb8e7ddcf7818993efef024100f077b2ca6255ef543730f381b248",
         );
+        assert_eq!(db.close_block().await.hash(), block_hash2);
         assert_eq!(db.current_version().await, 2);
-        let block_hash2 = db.get_latest_block().await.hash();
-        let (_, proof) = db.get_balance(address1, block_hash1).await.unwrap();
-        assert_eq!(proof.value_as_scalar(), Scalar::from(321));
-        let (_, proof) = db.get_balance(address2, block_hash1).await.unwrap();
-        assert_eq!(proof.value_as_scalar(), Scalar::from(100));
-        let (_, proof) = db.get_balance(address1, block_hash2).await.unwrap();
-        assert_eq!(proof.value_as_scalar(), Scalar::from(198));
-        let (_, proof) = db.get_balance(address2, block_hash2).await.unwrap();
-        assert_eq!(proof.value_as_scalar(), Scalar::from(223));
+        let (_, proof) = db.get_account_info(address1, block_hash1).await.unwrap();
+        assert_eq!(*proof.value(), AccountInfo::with_balance(321.into()));
+        let (_, proof) = db.get_account_info(address2, block_hash1).await.unwrap();
+        assert_eq!(*proof.value(), AccountInfo::with_balance(100.into()));
+        let (_, proof) = db.get_account_info(address1, block_hash2).await.unwrap();
+        assert_eq!(
+            *proof.value(),
+            AccountInfo {
+                last_nonce: 10,
+                balance: 198.into(),
+                staking_balance: Scalar::ZERO,
+            }
+        );
+        let (_, proof) = db.get_account_info(address2, block_hash2).await.unwrap();
+        assert_eq!(*proof.value(), AccountInfo::with_balance(223.into()));
     }
 
     #[tokio::test]
@@ -1756,7 +1554,10 @@ mod tests {
             clock,
             TEST_CHAIN_ID,
             testing_identity(),
-            [(address1, Scalar::from(321)), (address2, Scalar::from(100))],
+            [
+                (address1, AccountInfo::with_balance(321.into())),
+                (address2, AccountInfo::with_balance(100.into())),
+            ],
         )
         .unwrap();
         let signature_nonce = H256::from_slice(&[
@@ -1771,7 +1572,7 @@ mod tests {
                     TEST_CHAIN_ID,
                     10,
                     address2,
-                    Scalar::from(123)
+                    123.into(),
                 )
                 .unwrap()
             )
@@ -1786,7 +1587,7 @@ mod tests {
                     TEST_CHAIN_ID,
                     10,
                     address2,
-                    Scalar::from(123)
+                    123.into(),
                 )
                 .unwrap()
             )
@@ -1794,22 +1595,26 @@ mod tests {
             .is_err()
         );
         let block_hash1 = db.get_latest_block().await.hash();
-        assert_eq!(
-            db.close_block().await.hash(),
-            utils::parse_pallas_scalar(
-                "0x3a8f5a988eb534c4cc5f96bf048db0c6afc6e84d4080838546b33b7d754e2095"
-            )
+        let block_hash2 = utils::parse_pallas_scalar(
+            "0x2322760adbcb8e7ddcf7818993efef024100f077b2ca6255ef543730f381b248",
         );
+        assert_eq!(db.close_block().await.hash(), block_hash2);
         assert_eq!(db.current_version().await, 2);
-        let block_hash2 = db.get_latest_block().await.hash();
-        let (_, proof) = db.get_balance(address1, block_hash1).await.unwrap();
-        assert_eq!(proof.value_as_scalar(), Scalar::from(321));
-        let (_, proof) = db.get_balance(address2, block_hash1).await.unwrap();
-        assert_eq!(proof.value_as_scalar(), Scalar::from(100));
-        let (_, proof) = db.get_balance(address1, block_hash2).await.unwrap();
-        assert_eq!(proof.value_as_scalar(), Scalar::from(198));
-        let (_, proof) = db.get_balance(address2, block_hash2).await.unwrap();
-        assert_eq!(proof.value_as_scalar(), Scalar::from(223));
+        let (_, proof) = db.get_account_info(address1, block_hash1).await.unwrap();
+        assert_eq!(*proof.value(), AccountInfo::with_balance(321.into()));
+        let (_, proof) = db.get_account_info(address2, block_hash1).await.unwrap();
+        assert_eq!(*proof.value(), AccountInfo::with_balance(100.into()));
+        let (_, proof) = db.get_account_info(address1, block_hash2).await.unwrap();
+        assert_eq!(
+            *proof.value(),
+            AccountInfo {
+                last_nonce: 10,
+                balance: 198.into(),
+                staking_balance: Scalar::ZERO
+            }
+        );
+        let (_, proof) = db.get_account_info(address2, block_hash2).await.unwrap();
+        assert_eq!(*proof.value(), AccountInfo::with_balance(223.into()));
     }
 
     #[tokio::test]
@@ -1824,7 +1629,10 @@ mod tests {
             clock,
             TEST_CHAIN_ID,
             testing_identity(),
-            [(address1, Scalar::from(321)), (address2, Scalar::from(100))],
+            [
+                (address1, AccountInfo::with_balance(321.into())),
+                (address2, AccountInfo::with_balance(100.into())),
+            ],
         )
         .unwrap();
         let signature_nonce = H256::from_slice(&[
@@ -1839,7 +1647,7 @@ mod tests {
                     TEST_CHAIN_ID,
                     10,
                     address2,
-                    Scalar::from(123)
+                    123.into(),
                 )
                 .unwrap()
             )
@@ -1854,7 +1662,7 @@ mod tests {
                     TEST_CHAIN_ID,
                     11,
                     address2,
-                    Scalar::from(123)
+                    123.into(),
                 )
                 .unwrap()
             )
@@ -1862,22 +1670,26 @@ mod tests {
             .is_ok()
         );
         let block_hash1 = db.get_latest_block().await.hash();
-        assert_eq!(
-            db.close_block().await.hash(),
-            utils::parse_pallas_scalar(
-                "0x2ed30c56eb90f6388ea8d91d8c9b4df91f19b6c9aae44a22c2548b50a648d2b8"
-            )
+        let block_hash2 = utils::parse_pallas_scalar(
+            "0x38531be56a9413ce0c3bd6870369bca4fa9413a5bdd185d1ef3569993eaf9031",
         );
+        assert_eq!(db.close_block().await.hash(), block_hash2);
         assert_eq!(db.current_version().await, 2);
-        let block_hash2 = db.get_latest_block().await.hash();
-        let (_, proof) = db.get_balance(address1, block_hash1).await.unwrap();
-        assert_eq!(proof.value_as_scalar(), Scalar::from(321));
-        let (_, proof) = db.get_balance(address2, block_hash1).await.unwrap();
-        assert_eq!(proof.value_as_scalar(), Scalar::from(100));
-        let (_, proof) = db.get_balance(address1, block_hash2).await.unwrap();
-        assert_eq!(proof.value_as_scalar(), Scalar::from(75));
-        let (_, proof) = db.get_balance(address2, block_hash2).await.unwrap();
-        assert_eq!(proof.value_as_scalar(), Scalar::from(346));
+        let (_, proof) = db.get_account_info(address1, block_hash1).await.unwrap();
+        assert_eq!(*proof.value(), AccountInfo::with_balance(321.into()));
+        let (_, proof) = db.get_account_info(address2, block_hash1).await.unwrap();
+        assert_eq!(*proof.value(), AccountInfo::with_balance(100.into()));
+        let (_, proof) = db.get_account_info(address1, block_hash2).await.unwrap();
+        assert_eq!(
+            *proof.value(),
+            AccountInfo {
+                last_nonce: 11,
+                balance: 75.into(),
+                staking_balance: Scalar::ZERO
+            }
+        );
+        let (_, proof) = db.get_account_info(address2, block_hash2).await.unwrap();
+        assert_eq!(*proof.value(), AccountInfo::with_balance(346.into()));
     }
 
     // TODO

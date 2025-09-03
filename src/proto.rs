@@ -1,7 +1,7 @@
 use crate::dotakon;
 use crate::utils;
 use anyhow::Result;
-use pasta_curves::pallas::Scalar as ScalarPallas;
+use pasta_curves::pallas::Scalar;
 use primitive_types::{H256, U256};
 
 const MAX_VARINT_LENGTH: usize = 10;
@@ -31,6 +31,7 @@ macro_rules! dotakon_proto_name {
     };
 }
 
+dotakon_proto_name!(dotakon::AccountInfo, "AccountInfo");
 dotakon_proto_name!(dotakon::BlockDescriptor, "BlockDescriptor");
 dotakon_proto_name!(dotakon::BoundTransaction, "BoundTransaction");
 dotakon_proto_name!(dotakon::Bytes32, "Bytes32");
@@ -44,7 +45,7 @@ pub trait AnyProto: Sized {
     fn decode_from_any(proto: &prost_types::Any) -> Result<Self>;
 }
 
-impl AnyProto for ScalarPallas {
+impl AnyProto for Scalar {
     fn encode_to_any(&self) -> Result<prost_types::Any> {
         Ok(prost_types::Any::from_msg(&pallas_scalar_to_bytes32(
             *self,
@@ -53,6 +54,20 @@ impl AnyProto for ScalarPallas {
 
     fn decode_from_any(proto: &prost_types::Any) -> Result<Self> {
         pallas_scalar_from_bytes32(&proto.to_msg()?)
+    }
+}
+
+impl AnyProto for u64 {
+    fn encode_to_any(&self) -> Result<prost_types::Any> {
+        Ok(prost_types::Any::from_msg(&pallas_scalar_to_bytes32(
+            Scalar::from(*self),
+        ))?)
+    }
+
+    fn decode_from_any(proto: &prost_types::Any) -> Result<Self> {
+        let scalar = pallas_scalar_from_bytes32(&proto.to_msg()?)?;
+        let scalar = utils::pallas_scalar_to_u256(scalar);
+        Ok(scalar.as_u64())
     }
 }
 
@@ -69,10 +84,10 @@ pub fn u256_to_bytes32(value: U256) -> dotakon::Bytes32 {
     let mut words = [0u64; 4];
     words.copy_from_slice(word_vec.as_slice());
     dotakon::Bytes32 {
-        w1: Some(words[0]),
-        w2: Some(words[1]),
-        w3: Some(words[2]),
-        w4: Some(words[3]),
+        w1: if words[0] != 0 { Some(words[0]) } else { None },
+        w2: if words[1] != 0 { Some(words[1]) } else { None },
+        w3: if words[2] != 0 { Some(words[2]) } else { None },
+        w4: if words[3] != 0 { Some(words[3]) } else { None },
     }
 }
 
@@ -85,11 +100,11 @@ pub fn u256_from_bytes32(proto: &dotakon::Bytes32) -> U256 {
     U256::from_little_endian(&bytes)
 }
 
-pub fn pallas_scalar_to_bytes32(value: ScalarPallas) -> dotakon::Bytes32 {
+pub fn pallas_scalar_to_bytes32(value: Scalar) -> dotakon::Bytes32 {
     u256_to_bytes32(utils::pallas_scalar_to_u256(value))
 }
 
-pub fn pallas_scalar_from_bytes32(proto: &dotakon::Bytes32) -> Result<ScalarPallas> {
+pub fn pallas_scalar_from_bytes32(proto: &dotakon::Bytes32) -> Result<Scalar> {
     utils::u256_to_pallas_scalar(u256_from_bytes32(proto))
 }
 
@@ -234,8 +249,48 @@ mod tests {
         .unwrap();
         assert_eq!(
             value,
-            ScalarPallas::decode_from_any(&value.encode_to_any().unwrap()).unwrap()
+            Scalar::decode_from_any(&value.encode_to_any().unwrap()).unwrap()
         );
+    }
+
+    #[test]
+    fn test_invalid_pallas_scalar_from_any() {
+        let encoded = u256_to_bytes32(U256::from_little_endian(&[
+            1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+            24, 25, 26, 27, 28, 29, 30, 31, 255,
+        ]));
+        let any = prost_types::Any::from_msg(&encoded).unwrap();
+        assert!(Scalar::decode_from_any(&any).is_err());
+    }
+
+    #[test]
+    fn test_u64_to_any() {
+        let value = 0x0807060504030201u64;
+        let any = value.encode_to_any().unwrap();
+        let bytes32 = any.to_msg::<dotakon::Bytes32>().unwrap();
+        assert_eq!(bytes32.w1, Some(value));
+        assert_eq!(bytes32.w2, None);
+        assert_eq!(bytes32.w3, None);
+        assert_eq!(bytes32.w4, None);
+    }
+
+    #[test]
+    fn test_u64_from_any() {
+        let value = 0x0807060504030201u64;
+        assert_eq!(
+            value,
+            u64::decode_from_any(&value.encode_to_any().unwrap()).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_invalid_u64_from_any() {
+        let encoded = u256_to_bytes32(U256::from_little_endian(&[
+            1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+            24, 25, 26, 27, 28, 29, 30, 31, 255,
+        ]));
+        let any = prost_types::Any::from_msg(&encoded).unwrap();
+        assert!(u64::decode_from_any(&any).is_err());
     }
 
     #[test]

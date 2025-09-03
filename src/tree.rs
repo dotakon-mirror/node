@@ -1,21 +1,27 @@
 use crate::chips;
 use crate::dotakon;
-use crate::proto;
+use crate::proto::{self, AnyProto};
 use crate::utils;
 use crate::xits;
 use anyhow::{Result, anyhow};
-use ff::PrimeField;
+use ff::{Field, PrimeField};
 use halo2_proofs::{circuit, plonk, poly};
 use pasta_curves::pallas::Scalar;
 use std::any::Any;
 use std::any::TypeId;
 use std::collections::BTreeMap;
 use std::fmt::Debug;
-use std::marker::PhantomData;
 use std::sync::Arc;
 use std::sync::LazyLock;
 use std::sync::Mutex;
 
+/// Makes a type representable as a Pallas scalar. Must be implemened by all Merkle tree values.
+///
+/// Typical implementations use the value itself when it fits in a single Pallas scalar (e.g. u64 or
+/// Pallas scalars themselves), and use a Poseidon hash when it doesn't.
+///
+/// NOTE: the returned scalar must never change while the value is stored in the Merkle tree.
+/// Typical implementations are simply immutable so that the returned representation never changes.
 pub trait AsScalar {
     fn as_scalar(&self) -> Scalar;
 }
@@ -32,6 +38,14 @@ impl AsScalar for u64 {
     }
 }
 
+/// Makes a type parseable from a Pallas scalar. Must be implemented by all types used as keys in
+/// Merkle trees.
+///
+/// Pallas scalars are encoded in 32 bytes (they are ~255 bits wide) but if the key type requires
+/// less than that then the least significant bytes must be used, not the most significant ones.
+/// That is because the least significant bits are the ones closer to the leaves, as opposed to the
+/// most significant ones which are closest to the root, and using the former allows for trees of
+/// lower height.
 pub trait FromScalar: Sized {
     fn from_scalar(scalar: Scalar) -> Result<Self>;
 }
@@ -58,19 +72,19 @@ impl FromScalar for u64 {
 
 trait Node<
     K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
-    V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
+    V: Debug + Default + Clone + Send + Sync + AsScalar + AnyProto + 'static,
     const W: usize,
 >: Debug + Send + Sync + AsScalar + 'static
 {
     fn get(&self, key: K) -> &V;
     fn lookup(&self, key: K) -> (&V, Vec<[Scalar; W]>);
-    fn put(&self, key: K, value: V) -> Arc<dyn Node<K, V, W>>;
+    fn put(self: Arc<Self>, key: K, value: V) -> Arc<dyn Node<K, V, W>>;
 }
 
 #[derive(Debug)]
 struct PhantomNodes<
     K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
-    V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
+    V: Debug + Default + Clone + Send + Sync + AsScalar + AnyProto + 'static,
     const W: usize,
     const H: usize,
 > {
@@ -79,7 +93,7 @@ struct PhantomNodes<
 
 impl<
     K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
-    V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
+    V: Debug + Default + Clone + Send + Sync + AsScalar + AnyProto + 'static,
     const W: usize,
     const H: usize,
 > PhantomNodes<K, V, W, H>
@@ -91,7 +105,7 @@ impl<
 
 impl<
     K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
-    V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
+    V: Debug + Default + Clone + Send + Sync + AsScalar + AnyProto + 'static,
     const H: usize,
 > Default for PhantomNodes<K, V, 2, H>
 {
@@ -109,7 +123,7 @@ impl<
 
 impl<
     K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
-    V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
+    V: Debug + Default + Clone + Send + Sync + AsScalar + AnyProto + 'static,
     const H: usize,
 > Default for PhantomNodes<K, V, 3, H>
 {
@@ -136,7 +150,7 @@ struct MonomorphicPhantomNodes {
 impl MonomorphicPhantomNodes {
     fn get<
         K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
-        V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
+        V: Debug + Default + Clone + Send + Sync + AsScalar + AnyProto + 'static,
         const W: usize,
         const H: usize,
     >(
@@ -184,32 +198,21 @@ static PHANTOM_NODES: LazyLock<MonomorphicPhantomNodes> =
     LazyLock::new(|| MonomorphicPhantomNodes::default());
 
 #[derive(Debug, Clone)]
-struct Leaf<
-    K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
-    V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
-> {
+struct Leaf<V: Debug + Default + Clone + Send + Sync + AsScalar + AnyProto + 'static> {
     value: V,
-    _key: PhantomData<K>,
 }
 
-impl<
-    K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
-    V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
-> Leaf<K, V>
-{
+impl<V: Debug + Default + Clone + Send + Sync + AsScalar + AnyProto + 'static> Leaf<V> {
     fn new(value: V) -> Self {
-        Self {
-            value,
-            _key: PhantomData {},
-        }
+        Self { value }
     }
 }
 
 impl<
     K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
-    V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
+    V: Debug + Default + Clone + Send + Sync + AsScalar + AnyProto + 'static,
     const W: usize,
-> Node<K, V, W> for Leaf<K, V>
+> Node<K, V, W> for Leaf<V>
 {
     fn get(&self, _key: K) -> &V {
         &self.value
@@ -219,15 +222,17 @@ impl<
         (&self.value, vec![])
     }
 
-    fn put(&self, _key: K, value: V) -> Arc<dyn Node<K, V, W>> {
-        Arc::new(Self::new(value))
+    fn put(self: Arc<Self>, _key: K, value: V) -> Arc<dyn Node<K, V, W>> {
+        if value.as_scalar() != self.value.as_scalar() {
+            Arc::new(Self::new(value))
+        } else {
+            self
+        }
     }
 }
 
-impl<
-    K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
-    V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
-> AsScalar for Leaf<K, V>
+impl<V: Debug + Default + Clone + Send + Sync + AsScalar + AnyProto + 'static> AsScalar
+    for Leaf<V>
 {
     fn as_scalar(&self) -> Scalar {
         self.value.as_scalar()
@@ -237,7 +242,7 @@ impl<
 #[derive(Debug, Clone)]
 struct InternalNode<
     K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
-    V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
+    V: Debug + Default + Clone + Send + Sync + AsScalar + AnyProto + 'static,
     const W: usize,
 > {
     // TODO: convert `level` to a generic const argument when Rust supports generic const argument
@@ -249,7 +254,7 @@ struct InternalNode<
 
 impl<
     K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
-    V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
+    V: Debug + Default + Clone + Send + Sync + AsScalar + AnyProto + 'static,
     const W: usize,
 > InternalNode<K, V, W>
 {
@@ -276,7 +281,7 @@ impl<
 
 impl<
     K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
-    V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
+    V: Debug + Default + Clone + Send + Sync + AsScalar + AnyProto + 'static,
 > InternalNode<K, V, 2>
 {
     fn get_bit(&self, key: K) -> usize {
@@ -288,7 +293,7 @@ impl<
 
 impl<
     K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
-    V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
+    V: Debug + Default + Clone + Send + Sync + AsScalar + AnyProto + 'static,
 > Node<K, V, 2> for InternalNode<K, V, 2>
 {
     fn get(&self, key: K) -> &V {
@@ -301,16 +306,22 @@ impl<
         (value, path)
     }
 
-    fn put(&self, key: K, value: V) -> Arc<dyn Node<K, V, 2>> {
+    fn put(self: Arc<Self>, key: K, value: V) -> Arc<dyn Node<K, V, 2>> {
         let mut children = self.children.clone();
-        children[self.get_bit(key)] = children[self.get_bit(key)].put(key, value);
-        Arc::new(Self::new(self.level, children))
+        let bit = self.get_bit(key);
+        let child = children[bit].clone().put(key, value);
+        if child.as_scalar() != children[bit].as_scalar() {
+            children[bit] = child;
+            Arc::new(Self::new(self.level, children))
+        } else {
+            self
+        }
     }
 }
 
 impl<
     K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
-    V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
+    V: Debug + Default + Clone + Send + Sync + AsScalar + AnyProto + 'static,
 > InternalNode<K, V, 3>
 {
     fn get_trit(&self, key: K) -> usize {
@@ -322,7 +333,7 @@ impl<
 
 impl<
     K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
-    V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
+    V: Debug + Default + Clone + Send + Sync + AsScalar + AnyProto + 'static,
 > Node<K, V, 3> for InternalNode<K, V, 3>
 {
     fn get(&self, key: K) -> &V {
@@ -335,16 +346,22 @@ impl<
         (value, path)
     }
 
-    fn put(&self, key: K, value: V) -> Arc<dyn Node<K, V, 3>> {
+    fn put(self: Arc<Self>, key: K, value: V) -> Arc<dyn Node<K, V, 3>> {
         let mut children = self.children.clone();
-        children[self.get_trit(key)] = children[self.get_trit(key)].put(key, value);
-        Arc::new(Self::new(self.level, children))
+        let trit = self.get_trit(key);
+        let child = children[trit].clone().put(key, value);
+        if child.as_scalar() != children[trit].as_scalar() {
+            children[trit] = child;
+            Arc::new(Self::new(self.level, children))
+        } else {
+            self
+        }
     }
 }
 
 impl<
     K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
-    V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
+    V: Debug + Default + Clone + Send + Sync + AsScalar + AnyProto + 'static,
     const W: usize,
 > AsScalar for InternalNode<K, V, W>
 {
@@ -356,27 +373,29 @@ impl<
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MerkleProof<
     K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
+    V: Debug + Default + Clone + Send + Sync + AsScalar + AnyProto + 'static,
     const W: usize,
     const H: usize,
 > {
     key: K,
-    value_as_scalar: Scalar,
+    value: V,
     path: [[Scalar; W]; H],
     root_hash: Scalar,
 }
 
 impl<
     K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
+    V: Debug + Default + Clone + Send + Sync + AsScalar + AnyProto + 'static,
     const W: usize,
     const H: usize,
-> MerkleProof<K, W, H>
+> MerkleProof<K, V, W, H>
 {
     pub fn key(&self) -> K {
         self.key
     }
 
-    pub fn value_as_scalar(&self) -> Scalar {
-        self.value_as_scalar
+    pub fn value(&self) -> &V {
+        &self.value
     }
 
     pub fn path(&self) -> &[[Scalar; W]; H] {
@@ -388,8 +407,11 @@ impl<
     }
 }
 
-impl<K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static, const H: usize>
-    MerkleProof<K, 2, H>
+impl<
+    K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
+    V: Debug + Default + Clone + Send + Sync + AsScalar + AnyProto + 'static,
+    const H: usize,
+> MerkleProof<K, V, 2, H>
 {
     pub fn verify(&self, root_hash: Scalar) -> Result<()> {
         if root_hash != self.root_hash {
@@ -400,7 +422,7 @@ impl<K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static, const 
             ));
         }
         let mut key = self.key.into();
-        let mut hash = self.value_as_scalar;
+        let mut hash = self.value.as_scalar();
         for children in self.path {
             let bit = xits::and1(key);
             let bit = bit.to_repr()[0] as usize;
@@ -426,8 +448,11 @@ impl<K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static, const 
     }
 }
 
-impl<K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static, const H: usize>
-    MerkleProof<K, 3, H>
+impl<
+    K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
+    V: Debug + Default + Clone + Send + Sync + AsScalar + AnyProto + 'static,
+    const H: usize,
+> MerkleProof<K, V, 3, H>
 {
     pub fn verify(&self, root_hash: Scalar) -> Result<()> {
         if root_hash != self.root_hash {
@@ -438,7 +463,7 @@ impl<K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static, const 
             ));
         }
         let mut key = self.key.into();
-        let mut hash = self.value_as_scalar;
+        let mut hash = self.value.as_scalar();
         for children in self.path {
             let trit = xits::mod3(key);
             let trit = trit.to_repr()[0] as usize;
@@ -467,9 +492,10 @@ impl<K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static, const 
 
 impl<
     K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
+    V: Debug + Default + Clone + Send + Sync + AsScalar + AnyProto + 'static,
     const W: usize,
     const H: usize,
-> MerkleProof<K, W, H>
+> MerkleProof<K, V, W, H>
 {
     /// Encodes this proof into a `MerkleProof` protobuf. Note that the block descriptor must be
     /// provided by the caller.
@@ -480,9 +506,7 @@ impl<
         Ok(dotakon::MerkleProof {
             block_descriptor: Some(block_descriptor),
             key: Some(proto::pallas_scalar_to_bytes32(self.key.into())),
-            value: Some(prost_types::Any::from_msg(
-                &proto::pallas_scalar_to_bytes32(self.value_as_scalar),
-            )?),
+            value: Some(self.value.encode_to_any()?),
             path: self
                 .path
                 .iter()
@@ -496,16 +520,15 @@ impl<
     /// Decodes a Merkle proof from the provided protobuf. The `block_descriptor` is ignored. The
     /// resulting proof is not verified (use `decode_and_verify` to decode and verify it).
     pub fn decode(proto: &dotakon::MerkleProof) -> Result<Self> {
-        if proto.key.is_none() {
-            return Err(anyhow!("invalid Merkle proof: the key is missing"));
-        }
-        let key = proto::pallas_scalar_from_bytes32(&proto.key.unwrap())?;
+        let key = match &proto.key {
+            Some(key) => proto::pallas_scalar_from_bytes32(key),
+            None => Err(anyhow!("invalid Merkle proof: the key is missing")),
+        }?;
         let key = K::from_scalar(key)?;
-        if proto.value.is_none() {
-            return Err(anyhow!("invalid Merkle proof: the value is missing"));
-        }
-        let value_as_scalar = proto.value.as_ref().unwrap().to_msg::<dotakon::Bytes32>()?;
-        let value_as_scalar = proto::pallas_scalar_from_bytes32(&value_as_scalar)?;
+        let value = match &proto.value {
+            Some(value) => V::decode_from_any(value),
+            None => Err(anyhow!("invalid Merkle proof: the value is missing")),
+        }?;
         let path: [[Scalar; W]; H] = proto
             .path
             .iter()
@@ -535,22 +558,25 @@ impl<
         let root_hash = utils::poseidon_hash(path[H - 1]);
         Ok(Self {
             key,
-            value_as_scalar,
+            value,
             path,
             root_hash,
         })
     }
 }
 
-impl<K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static, const H: usize>
-    MerkleProof<K, 2, H>
+impl<
+    K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
+    V: Debug + Default + Clone + Send + Sync + AsScalar + AnyProto + 'static,
+    const H: usize,
+> MerkleProof<K, V, 2, H>
 {
     /// Like `decode` but also validates the decoded proof against the provided root hash.
     ///
     /// Note that the root hash should be the same as one of the root hashes specified in the block
     /// descriptor, depending on what storage component this proof is relative to. For example, if
-    /// the proof was generated from an account balance lookup the root hash must be the same as the
-    /// one encoded in `block_descriptor.account_balances_root_hash`.
+    /// the proof was generated from an account lookup the root hash must be the same as the one
+    /// encoded in `block_descriptor.accounts_root_hash`.
     pub fn decode_and_verify(proto: &dotakon::MerkleProof, root_hash: Scalar) -> Result<Self> {
         let proof = Self::decode(proto)?;
         proof.verify(root_hash)?;
@@ -558,15 +584,18 @@ impl<K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static, const 
     }
 }
 
-impl<K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static, const H: usize>
-    MerkleProof<K, 3, H>
+impl<
+    K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
+    V: Debug + Default + Clone + Send + Sync + AsScalar + AnyProto + 'static,
+    const H: usize,
+> MerkleProof<K, V, 3, H>
 {
     /// Like `decode` but also validates the decoded proof against the provided root hash.
     ///
     /// Note that the root hash should be the same as one of the root hashes specified in the block
     /// descriptor, depending on what storage component this proof is relative to. For example, if
-    /// the proof was generated from an account balance lookup the root hash must be the same as the
-    /// one encoded in `block_descriptor.account_balances_root_hash`.
+    /// the proof was generated from an account lookup the root hash must be the same as the one
+    /// encoded in `block_descriptor.accounts_root_hash`.
     pub fn decode_and_verify(proto: &dotakon::MerkleProof, root_hash: Scalar) -> Result<Self> {
         let proof = Self::decode(proto)?;
         proof.verify(root_hash)?;
@@ -629,12 +658,15 @@ impl<const H: usize> BinaryLookupChip<H> {
         Self { config }
     }
 
-    pub fn assign<K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static>(
+    pub fn assign<
+        K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
+        V: Debug + Default + Clone + Send + Sync + AsScalar + AnyProto + 'static,
+    >(
         &self,
         layouter: &mut impl circuit::Layouter<Scalar>,
         root_hash: chips::AssignedCell,
         key: chips::AssignedCell,
-        merkle_proof: &MerkleProof<K, 2, H>,
+        merkle_proof: &MerkleProof<K, V, 2, H>,
     ) -> Result<chips::AssignedCell, plonk::Error> {
         let bit_decomposer =
             chips::FullBitDecomposerChip::construct(self.config.full_bit_decomposer.clone());
@@ -646,7 +678,7 @@ impl<const H: usize> BinaryLookupChip<H> {
                     || "load_value",
                     self.config.hash,
                     0,
-                    || circuit::Value::known(merkle_proof.value_as_scalar()),
+                    || circuit::Value::known(merkle_proof.value().as_scalar()),
                 )
             },
         )?;
@@ -779,12 +811,15 @@ impl<const H: usize> TernaryLookupChip<H> {
         Self { config }
     }
 
-    pub fn assign<K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static>(
+    pub fn assign<
+        K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
+        V: Debug + Default + Clone + Send + Sync + AsScalar + AnyProto + 'static,
+    >(
         &self,
         layouter: &mut impl circuit::Layouter<Scalar>,
         root_hash: chips::AssignedCell,
         key: chips::AssignedCell,
-        merkle_proof: &MerkleProof<K, 3, H>,
+        merkle_proof: &MerkleProof<K, V, 3, H>,
     ) -> Result<chips::AssignedCell, plonk::Error> {
         let trit_decomposer =
             chips::FullTritDecomposerChip::construct(self.config.full_trit_decomposer.clone());
@@ -796,7 +831,7 @@ impl<const H: usize> TernaryLookupChip<H> {
                     || "load_value",
                     self.config.hash,
                     0,
-                    || circuit::Value::known(merkle_proof.value_as_scalar()),
+                    || circuit::Value::known(merkle_proof.value().as_scalar()),
                 )
             },
         )?;
@@ -863,7 +898,7 @@ impl<const H: usize> circuit::Chip<Scalar> for TernaryLookupChip<H> {
 #[derive(Debug, Clone)]
 pub struct MerkleTreeVersion<
     K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
-    V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
+    V: Debug + Default + Clone + Send + Sync + AsScalar + AnyProto + 'static,
     const W: usize,
     const H: usize,
 > {
@@ -872,7 +907,7 @@ pub struct MerkleTreeVersion<
 
 impl<
     K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
-    V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
+    V: Debug + Default + Clone + Send + Sync + AsScalar + AnyProto + 'static,
     const W: usize,
     const H: usize,
 > MerkleTreeVersion<K, V, W, H>
@@ -893,11 +928,11 @@ impl<
         self.root.get(key)
     }
 
-    pub fn get_proof(&self, key: K) -> MerkleProof<K, W, H> {
+    pub fn get_proof(&self, key: K) -> MerkleProof<K, V, W, H> {
         let (value, path) = self.root.lookup(key);
         MerkleProof {
             key,
-            value_as_scalar: value.as_scalar(),
+            value: value.clone(),
             path: path.try_into().unwrap(),
             root_hash: self.root.as_scalar(),
         }
@@ -905,14 +940,14 @@ impl<
 
     fn put(&self, key: K, value: V) -> Self {
         Self {
-            root: self.root.put(key, value),
+            root: self.root.clone().put(key, value),
         }
     }
 }
 
 impl<
     K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
-    V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
+    V: Debug + Default + Clone + Send + Sync + AsScalar + AnyProto + 'static,
     const W: usize,
     const H: usize,
 > Default for MerkleTreeVersion<K, V, W, H>
@@ -926,7 +961,7 @@ impl<
 
 impl<
     K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
-    V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
+    V: Debug + Default + Clone + Send + Sync + AsScalar + AnyProto + 'static,
     const W: usize,
     const H: usize,
 > AsScalar for MerkleTreeVersion<K, V, W, H>
@@ -936,10 +971,31 @@ impl<
     }
 }
 
+impl<
+    K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
+    V: Debug + Default + Clone + Send + Sync + AsScalar + AnyProto + 'static,
+    const W: usize,
+    const H: usize,
+> AnyProto for MerkleTreeVersion<K, V, W, H>
+{
+    fn encode_to_any(&self) -> Result<prost_types::Any> {
+        Ok(prost_types::Any::from_msg(
+            &proto::pallas_scalar_to_bytes32(self.root_hash()),
+        )?)
+    }
+
+    fn decode_from_any(_proto: &prost_types::Any) -> Result<Self> {
+        // TODO: split `AnyProto` in two: `EncodeToAny` and `DecodeFromAny`. This way they can be
+        // implemented selectively so that these errors are detected at compile time and we avoid
+        // crashing with `unimplemented!()`.
+        unimplemented!()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct MerkleTree<
     K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
-    V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
+    V: Debug + Default + Clone + Send + Sync + AsScalar + AnyProto + 'static,
     const W: usize,
     const H: usize,
 > {
@@ -948,7 +1004,7 @@ pub struct MerkleTree<
 
 impl<
     K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
-    V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
+    V: Debug + Default + Clone + Send + Sync + AsScalar + AnyProto + 'static,
     const W: usize,
     const H: usize,
 > MerkleTree<K, V, W, H>
@@ -974,7 +1030,7 @@ impl<
         version.get(key)
     }
 
-    pub fn get_proof(&self, key: K, version: u64) -> MerkleProof<K, W, H> {
+    pub fn get_proof(&self, key: K, version: u64) -> MerkleProof<K, V, W, H> {
         let (_, version) = self.versions.range(0..=version).next_back().unwrap();
         version.get_proof(key)
     }
@@ -990,7 +1046,7 @@ impl<
 
 impl<
     K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
-    V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
+    V: Debug + Default + Clone + Send + Sync + AsScalar + AnyProto + 'static,
     const W: usize,
     const H: usize,
 > Default for MerkleTree<K, V, W, H>
@@ -1002,19 +1058,64 @@ impl<
     }
 }
 
-pub type AccountBalanceTree = MerkleTree<Scalar, Scalar, 3, 161>;
-pub type AccountBalanceProof = MerkleProof<Scalar, 3, 161>;
+#[derive(Debug, Default, Copy, Clone, PartialEq, Eq)]
+pub struct AccountInfo {
+    pub last_nonce: u64,
+    pub balance: Scalar,
+    pub staking_balance: Scalar,
+}
+
+impl AccountInfo {
+    pub fn with_balance(balance: Scalar) -> Self {
+        Self {
+            last_nonce: 0,
+            balance,
+            staking_balance: Scalar::ZERO,
+        }
+    }
+}
+
+impl AsScalar for AccountInfo {
+    fn as_scalar(&self) -> Scalar {
+        utils::poseidon_hash([self.last_nonce.into(), self.balance, self.staking_balance])
+    }
+}
+
+impl AnyProto for AccountInfo {
+    fn encode_to_any(&self) -> Result<prost_types::Any> {
+        Ok(prost_types::Any::from_msg(&dotakon::AccountInfo {
+            last_nonce: Some(self.last_nonce),
+            balance: Some(proto::pallas_scalar_to_bytes32(self.balance)),
+            staking_balance: Some(proto::pallas_scalar_to_bytes32(self.staking_balance)),
+        })?)
+    }
+
+    fn decode_from_any(proto: &prost_types::Any) -> Result<Self> {
+        let proto = proto.to_msg::<dotakon::AccountInfo>()?;
+        Ok(Self {
+            last_nonce: proto.last_nonce(),
+            balance: proto.balance.map_or(Ok(Scalar::ZERO), |balance| {
+                proto::pallas_scalar_from_bytes32(&balance)
+            })?,
+            staking_balance: proto.staking_balance.map_or(Ok(Scalar::ZERO), |balance| {
+                proto::pallas_scalar_from_bytes32(&balance)
+            })?,
+        })
+    }
+}
+
+pub type AccountTree = MerkleTree<Scalar, AccountInfo, 3, 161>;
+pub type AccountProof = MerkleProof<Scalar, AccountInfo, 3, 161>;
 
 pub type ProgramStorageTree = MerkleTree<Scalar, MerkleTreeVersion<u64, u64, 2, 64>, 3, 161>;
-pub type ProgramStorageProof = MerkleProof<u64, 2, 64>;
-
-pub type AccountNoncesTree = MerkleTree<Scalar, u64, 3, 161>;
-pub type AccountNonceProof = MerkleProof<Scalar, 3, 161>;
+pub type ProgramStorageProof = MerkleProof<u64, u64, 2, 64>;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ff::Field;
+
+    type TestTree = MerkleTree<Scalar, Scalar, 3, 161>;
+    type TestProof = MerkleProof<Scalar, Scalar, 3, 161>;
 
     fn test_scalar1() -> Scalar {
         Scalar::from_repr_vartime([
@@ -1042,7 +1143,7 @@ mod tests {
 
     #[test]
     fn test_initial_root_hash() {
-        let tree = AccountBalanceTree::default();
+        let tree = TestTree::default();
         let hash = utils::parse_pallas_scalar(
             "0x3a58ebcf79758fe999e34819d451118b52ca59d7bbaadc089272bc776c9b3694",
         );
@@ -1052,11 +1153,11 @@ mod tests {
     }
 
     fn test_initial_state(key: Scalar, version: u64) {
-        let tree = AccountBalanceTree::default();
+        let tree = TestTree::default();
         assert_eq!(*tree.get(key, version), Scalar::ZERO);
         let proof = tree.get_proof(key, version);
         assert_eq!(proof.key(), key);
-        assert_eq!(proof.value_as_scalar(), Scalar::ZERO);
+        assert_eq!(*proof.value(), Scalar::ZERO);
         assert_eq!(proof.root_hash(), tree.root_hash(version));
         assert!(proof.verify(tree.root_hash(version)).is_ok());
     }
@@ -1078,15 +1179,15 @@ mod tests {
     }
 
     fn test_from_empty(key: Scalar, version: u64) {
-        let tree = AccountBalanceTree::from([]);
+        let tree = TestTree::from([]);
         assert_eq!(
             tree.root_hash(version),
-            AccountBalanceTree::default().root_hash(version)
+            TestTree::default().root_hash(version)
         );
         assert_eq!(*tree.get(key, version), Scalar::ZERO);
         let proof = tree.get_proof(key, version);
         assert_eq!(proof.key(), key);
-        assert_eq!(proof.value_as_scalar(), Scalar::ZERO);
+        assert_eq!(*proof.value(), Scalar::ZERO);
         assert_eq!(proof.root_hash(), tree.root_hash(version));
         assert!(proof.verify(tree.root_hash(version)).is_ok());
     }
@@ -1109,17 +1210,17 @@ mod tests {
 
     #[test]
     fn test_insert_one() {
-        let mut tree = AccountBalanceTree::default();
+        let mut tree = TestTree::default();
         let key1 = test_scalar1();
         let key2 = test_scalar2();
-        let value = test_scalar2();
-        tree.put(key1, value.clone(), 0);
+        let value = test_scalar3();
+        tree.put(key1, value, 0);
         assert_eq!(*tree.get(key1, 0), value);
         assert_eq!(*tree.get(key1, 1), value);
         assert_eq!(*tree.get(key1, 2), value);
         let proof1 = tree.get_proof(key1, 0);
         assert_eq!(proof1.key(), key1);
-        assert_eq!(proof1.value_as_scalar(), value);
+        assert_eq!(*proof1.value(), value);
         assert_eq!(proof1.root_hash(), tree.root_hash(0));
         assert_eq!(proof1.root_hash(), tree.root_hash(1));
         assert_eq!(proof1.root_hash(), tree.root_hash(2));
@@ -1131,7 +1232,7 @@ mod tests {
         assert_eq!(*tree.get(key2, 2), Scalar::ZERO);
         let proof2 = tree.get_proof(key2, 0);
         assert_eq!(proof2.key(), key2);
-        assert_eq!(proof2.value_as_scalar(), Scalar::ZERO);
+        assert_eq!(*proof2.value(), Scalar::ZERO);
         assert_eq!(proof2.root_hash(), tree.root_hash(0));
         assert_eq!(proof2.root_hash(), tree.root_hash(1));
         assert_eq!(proof2.root_hash(), tree.root_hash(2));
@@ -1142,11 +1243,11 @@ mod tests {
 
     #[test]
     fn test_first_root_hash_change() {
-        let mut tree = AccountBalanceTree::default();
+        let mut tree = TestTree::default();
         let key1 = test_scalar1();
         let value = test_scalar2();
         let hash1 = tree.root_hash(0);
-        tree.put(key1, value.clone(), 0);
+        tree.put(key1, value, 0);
         let hash2 = tree.root_hash(0);
         assert_ne!(hash1, hash2);
     }
@@ -1156,9 +1257,9 @@ mod tests {
         let key1 = test_scalar1();
         let key2 = test_scalar2();
         let value = test_scalar2();
-        let tree1 = AccountBalanceTree::from([(key1, value)]);
-        let mut tree2 = AccountBalanceTree::default();
-        tree2.put(key1, value.clone(), 0);
+        let tree1 = TestTree::from([(key1, value)]);
+        let mut tree2 = TestTree::default();
+        tree2.put(key1, value, 0);
         assert_eq!(tree1.root_hash(0), tree2.root_hash(0));
         assert_eq!(tree1.root_hash(0), tree2.root_hash(1));
         assert_eq!(*tree1.get(key1, 0), value);
@@ -1166,7 +1267,7 @@ mod tests {
         assert_eq!(*tree1.get(key1, 2), value);
         let proof1 = tree1.get_proof(key1, 0);
         assert_eq!(proof1.key(), key1);
-        assert_eq!(proof1.value_as_scalar(), value);
+        assert_eq!(*proof1.value(), value);
         assert_eq!(proof1.root_hash(), tree1.root_hash(0));
         assert_eq!(proof1.root_hash(), tree1.root_hash(1));
         assert_eq!(proof1.root_hash(), tree1.root_hash(2));
@@ -1178,7 +1279,7 @@ mod tests {
         assert_eq!(*tree1.get(key2, 2), Scalar::ZERO);
         let proof2 = tree1.get_proof(key2, 0);
         assert_eq!(proof2.key(), key2);
-        assert_eq!(proof2.value_as_scalar(), Scalar::ZERO);
+        assert_eq!(*proof2.value(), Scalar::ZERO);
         assert_eq!(proof2.root_hash(), tree1.root_hash(0));
         assert_eq!(proof2.root_hash(), tree1.root_hash(1));
         assert_eq!(proof2.root_hash(), tree1.root_hash(2));
@@ -1189,19 +1290,19 @@ mod tests {
 
     #[test]
     fn test_insert_two() {
-        let mut tree = AccountBalanceTree::default();
+        let mut tree = TestTree::default();
         let key1 = test_scalar1();
         let key2 = test_scalar2();
         let value1 = test_scalar2();
         let value2 = test_scalar1();
-        tree.put(key1, value1.clone(), 0);
-        tree.put(key2, value2.clone(), 0);
+        tree.put(key1, value1, 0);
+        tree.put(key2, value2, 0);
         assert_eq!(*tree.get(key1, 0), value1);
         assert_eq!(*tree.get(key1, 1), value1);
         assert_eq!(*tree.get(key1, 2), value1);
         let proof1 = tree.get_proof(key1, 0);
         assert_eq!(proof1.key(), key1);
-        assert_eq!(proof1.value_as_scalar(), value1);
+        assert_eq!(*proof1.value(), value1);
         assert_eq!(proof1.root_hash(), tree.root_hash(0));
         assert_eq!(proof1.root_hash(), tree.root_hash(1));
         assert_eq!(proof1.root_hash(), tree.root_hash(2));
@@ -1213,7 +1314,7 @@ mod tests {
         assert_eq!(*tree.get(key2, 2), value2);
         let proof2 = tree.get_proof(key2, 0);
         assert_eq!(proof2.key(), key2);
-        assert_eq!(proof2.value_as_scalar(), value2);
+        assert_eq!(*proof2.value(), value2);
         assert_eq!(proof2.root_hash(), tree.root_hash(0));
         assert_eq!(proof2.root_hash(), tree.root_hash(1));
         assert_eq!(proof2.root_hash(), tree.root_hash(2));
@@ -1224,7 +1325,7 @@ mod tests {
 
     #[test]
     fn test_second_root_hash_change() {
-        let mut tree = AccountBalanceTree::default();
+        let mut tree = TestTree::default();
         let key1 = test_scalar1();
         let key2 = test_scalar2();
         let value1 = test_scalar2();
@@ -1242,8 +1343,8 @@ mod tests {
         let key2 = test_scalar2();
         let value1 = test_scalar2();
         let value2 = test_scalar1();
-        let tree1 = AccountBalanceTree::from([(key1, value1), (key2, value2)]);
-        let mut tree2 = AccountBalanceTree::default();
+        let tree1 = TestTree::from([(key1, value1), (key2, value2)]);
+        let mut tree2 = TestTree::default();
         tree2.put(key1, value1.clone(), 0);
         tree2.put(key2, value2.clone(), 0);
         assert_eq!(tree1.root_hash(0), tree2.root_hash(0));
@@ -1253,7 +1354,7 @@ mod tests {
         assert_eq!(*tree1.get(key1, 2), value1);
         let proof1 = tree1.get_proof(key1, 0);
         assert_eq!(proof1.key(), key1);
-        assert_eq!(proof1.value_as_scalar(), value1);
+        assert_eq!(*proof1.value(), value1);
         assert_eq!(proof1.root_hash(), tree1.root_hash(0));
         assert_eq!(proof1.root_hash(), tree1.root_hash(1));
         assert_eq!(proof1.root_hash(), tree1.root_hash(2));
@@ -1265,7 +1366,7 @@ mod tests {
         assert_eq!(*tree1.get(key2, 2), value2);
         let proof2 = tree1.get_proof(key2, 0);
         assert_eq!(proof2.key(), key2);
-        assert_eq!(proof2.value_as_scalar(), value2);
+        assert_eq!(*proof2.value(), value2);
         assert_eq!(proof2.root_hash(), tree1.root_hash(0));
         assert_eq!(proof2.root_hash(), tree1.root_hash(1));
         assert_eq!(proof2.root_hash(), tree1.root_hash(2));
@@ -1276,7 +1377,7 @@ mod tests {
 
     #[test]
     fn test_insert_with_shared_prefix() {
-        let mut tree = AccountBalanceTree::default();
+        let mut tree = TestTree::default();
         let key1 = test_scalar1();
         let key2 = test_scalar3();
         let value1 = test_scalar2();
@@ -1288,7 +1389,7 @@ mod tests {
         assert_eq!(*tree.get(key1, 2), value1);
         let proof1 = tree.get_proof(key1, 0);
         assert_eq!(proof1.key(), key1);
-        assert_eq!(proof1.value_as_scalar(), value1);
+        assert_eq!(*proof1.value(), value1);
         assert_eq!(proof1.root_hash(), tree.root_hash(0));
         assert_eq!(proof1.root_hash(), tree.root_hash(1));
         assert_eq!(proof1.root_hash(), tree.root_hash(2));
@@ -1300,7 +1401,7 @@ mod tests {
         assert_eq!(*tree.get(key2, 2), value2);
         let proof2 = tree.get_proof(key2, 0);
         assert_eq!(proof2.key(), key2);
-        assert_eq!(proof2.value_as_scalar(), value2);
+        assert_eq!(*proof2.value(), value2);
         assert_eq!(proof2.root_hash(), tree.root_hash(0));
         assert_eq!(proof2.root_hash(), tree.root_hash(1));
         assert_eq!(proof2.root_hash(), tree.root_hash(2));
@@ -1310,7 +1411,7 @@ mod tests {
     }
 
     fn test_insert_three(value1: Scalar, value2: Scalar, value3: Scalar) {
-        let mut tree = AccountBalanceTree::default();
+        let mut tree = TestTree::default();
         tree.put(value1, value1.clone(), 0);
         tree.put(value2, value2.clone(), 0);
         tree.put(value3, value3.clone(), 0);
@@ -1319,7 +1420,7 @@ mod tests {
         assert_eq!(*tree.get(value1, 2), value1);
         let proof1 = tree.get_proof(value1, 0);
         assert_eq!(proof1.key(), value1);
-        assert_eq!(proof1.value_as_scalar(), value1);
+        assert_eq!(*proof1.value(), value1);
         assert_eq!(proof1.root_hash(), tree.root_hash(0));
         assert_eq!(proof1.root_hash(), tree.root_hash(1));
         assert_eq!(proof1.root_hash(), tree.root_hash(2));
@@ -1331,7 +1432,7 @@ mod tests {
         assert_eq!(*tree.get(value2, 2), value2);
         let proof2 = tree.get_proof(value2, 0);
         assert_eq!(proof2.key(), value2);
-        assert_eq!(proof2.value_as_scalar(), value2);
+        assert_eq!(*proof2.value(), value2);
         assert_eq!(proof2.root_hash(), tree.root_hash(0));
         assert_eq!(proof2.root_hash(), tree.root_hash(1));
         assert_eq!(proof2.root_hash(), tree.root_hash(2));
@@ -1343,7 +1444,7 @@ mod tests {
         assert_eq!(*tree.get(value3, 2), value3);
         let proof3 = tree.get_proof(value3, 0);
         assert_eq!(proof3.key(), value3);
-        assert_eq!(proof3.value_as_scalar(), value3);
+        assert_eq!(*proof3.value(), value3);
         assert_eq!(proof3.root_hash(), tree.root_hash(0));
         assert_eq!(proof3.root_hash(), tree.root_hash(1));
         assert_eq!(proof3.root_hash(), tree.root_hash(2));
@@ -1384,7 +1485,7 @@ mod tests {
 
     #[test]
     fn test_update() {
-        let mut tree = AccountBalanceTree::default();
+        let mut tree = TestTree::default();
         let key1 = test_scalar1();
         let key2 = test_scalar2();
         let value1 = test_scalar2();
@@ -1396,7 +1497,7 @@ mod tests {
         assert_eq!(*tree.get(key1, 2), value2);
         let proof1 = tree.get_proof(key1, 0);
         assert_eq!(proof1.key(), key1);
-        assert_eq!(proof1.value_as_scalar(), value2);
+        assert_eq!(*proof1.value(), value2);
         assert_eq!(proof1.root_hash(), tree.root_hash(0));
         assert_eq!(proof1.root_hash(), tree.root_hash(1));
         assert_eq!(proof1.root_hash(), tree.root_hash(2));
@@ -1408,7 +1509,7 @@ mod tests {
         assert_eq!(*tree.get(key2, 2), Scalar::ZERO);
         let proof2 = tree.get_proof(key2, 0);
         assert_eq!(proof2.key(), key2);
-        assert_eq!(proof2.value_as_scalar(), Scalar::ZERO);
+        assert_eq!(*proof2.value(), Scalar::ZERO);
         assert_eq!(proof2.root_hash(), tree.root_hash(0));
         assert_eq!(proof2.root_hash(), tree.root_hash(1));
         assert_eq!(proof2.root_hash(), tree.root_hash(2));
@@ -1419,7 +1520,7 @@ mod tests {
 
     #[test]
     fn test_new_version() {
-        let mut tree = AccountBalanceTree::default();
+        let mut tree = TestTree::default();
         let key1 = test_scalar1();
         let key2 = test_scalar2();
         let value1 = test_scalar2();
@@ -1431,7 +1532,7 @@ mod tests {
         assert_eq!(*tree.get(key1, 2), value2);
         let proof11 = tree.get_proof(key1, 0);
         assert_eq!(proof11.key(), key1);
-        assert_eq!(proof11.value_as_scalar(), value1);
+        assert_eq!(*proof11.value(), value1);
         assert_eq!(proof11.root_hash(), tree.root_hash(0));
         assert_ne!(proof11.root_hash(), tree.root_hash(1));
         assert_ne!(proof11.root_hash(), tree.root_hash(2));
@@ -1439,7 +1540,7 @@ mod tests {
         assert!(proof11.verify(tree.root_hash(1)).is_err());
         let proof12 = tree.get_proof(key1, 1);
         assert_eq!(proof12.key(), key1);
-        assert_eq!(proof12.value_as_scalar(), value2);
+        assert_eq!(*proof12.value(), value2);
         assert_ne!(proof12.root_hash(), tree.root_hash(0));
         assert_eq!(proof12.root_hash(), tree.root_hash(1));
         assert_eq!(proof12.root_hash(), tree.root_hash(2));
@@ -1451,7 +1552,7 @@ mod tests {
         assert_eq!(*tree.get(key2, 2), Scalar::ZERO);
         let proof21 = tree.get_proof(key2, 0);
         assert_eq!(proof21.key(), key2);
-        assert_eq!(proof21.value_as_scalar(), Scalar::ZERO);
+        assert_eq!(*proof21.value(), Scalar::ZERO);
         assert_eq!(proof21.root_hash(), tree.root_hash(0));
         assert_ne!(proof21.root_hash(), tree.root_hash(1));
         assert_ne!(proof21.root_hash(), tree.root_hash(2));
@@ -1459,7 +1560,7 @@ mod tests {
         assert!(proof21.verify(tree.root_hash(1)).is_err());
         let proof22 = tree.get_proof(key2, 1);
         assert_eq!(proof22.key(), key2);
-        assert_eq!(proof22.value_as_scalar(), Scalar::ZERO);
+        assert_eq!(*proof22.value(), Scalar::ZERO);
         assert_ne!(proof22.root_hash(), tree.root_hash(0));
         assert_eq!(proof22.root_hash(), tree.root_hash(1));
         assert_eq!(proof22.root_hash(), tree.root_hash(2));
@@ -1471,7 +1572,7 @@ mod tests {
 
     #[test]
     fn test_skip_version() {
-        let mut tree = AccountBalanceTree::default();
+        let mut tree = TestTree::default();
         let key1 = test_scalar1();
         let key2 = test_scalar2();
         let value1 = test_scalar2();
@@ -1483,7 +1584,7 @@ mod tests {
         assert_eq!(*tree.get(key1, 2), value2);
         let proof11 = tree.get_proof(key1, 0);
         assert_eq!(proof11.key(), key1);
-        assert_eq!(proof11.value_as_scalar(), value1);
+        assert_eq!(*proof11.value(), value1);
         assert_eq!(proof11.root_hash(), tree.root_hash(0));
         assert_eq!(proof11.root_hash(), tree.root_hash(1));
         assert_ne!(proof11.root_hash(), tree.root_hash(2));
@@ -1492,7 +1593,7 @@ mod tests {
         assert!(proof11.verify(tree.root_hash(2)).is_err());
         let proof12 = tree.get_proof(key1, 2);
         assert_eq!(proof12.key(), key1);
-        assert_eq!(proof12.value_as_scalar(), value2);
+        assert_eq!(*proof12.value(), value2);
         assert_ne!(proof12.root_hash(), tree.root_hash(0));
         assert_ne!(proof12.root_hash(), tree.root_hash(1));
         assert_eq!(proof12.root_hash(), tree.root_hash(2));
@@ -1505,7 +1606,7 @@ mod tests {
         assert_eq!(*tree.get(key2, 2), Scalar::ZERO);
         let proof21 = tree.get_proof(key2, 0);
         assert_eq!(proof21.key(), key2);
-        assert_eq!(proof21.value_as_scalar(), Scalar::ZERO);
+        assert_eq!(*proof21.value(), Scalar::ZERO);
         assert_eq!(proof21.root_hash(), tree.root_hash(0));
         assert_eq!(proof21.root_hash(), tree.root_hash(1));
         assert_ne!(proof21.root_hash(), tree.root_hash(2));
@@ -1514,7 +1615,7 @@ mod tests {
         assert!(proof21.verify(tree.root_hash(2)).is_err());
         let proof22 = tree.get_proof(key2, 2);
         assert_eq!(proof22.key(), key2);
-        assert_eq!(proof22.value_as_scalar(), Scalar::ZERO);
+        assert_eq!(*proof22.value(), Scalar::ZERO);
         assert_ne!(proof22.root_hash(), tree.root_hash(0));
         assert_ne!(proof22.root_hash(), tree.root_hash(1));
         assert_eq!(proof22.root_hash(), tree.root_hash(2));
@@ -1526,7 +1627,7 @@ mod tests {
 
     #[test]
     fn test_two_values_across_versions() {
-        let mut tree = AccountBalanceTree::default();
+        let mut tree = TestTree::default();
         let key1 = test_scalar1();
         let key2 = test_scalar2();
         let value1 = test_scalar2();
@@ -1540,7 +1641,7 @@ mod tests {
         assert_eq!(*tree.get(key1, 2), value1);
         let proof11 = tree.get_proof(key1, 0);
         assert_eq!(proof11.key(), key1);
-        assert_eq!(proof11.value_as_scalar(), value1.clone());
+        assert_eq!(*proof11.value(), value1.clone());
         assert_eq!(proof11.root_hash(), tree.root_hash(0));
         assert_eq!(proof11.root_hash(), tree.root_hash(1));
         assert_ne!(proof11.root_hash(), tree.root_hash(2));
@@ -1549,7 +1650,7 @@ mod tests {
         assert!(proof11.verify(tree.root_hash(2)).is_err());
         let proof12 = tree.get_proof(key1, 2);
         assert_eq!(proof12.key(), key1);
-        assert_eq!(proof12.value_as_scalar(), value1);
+        assert_eq!(*proof12.value(), value1);
         assert_ne!(proof12.root_hash(), tree.root_hash(0));
         assert_ne!(proof12.root_hash(), tree.root_hash(1));
         assert_eq!(proof12.root_hash(), tree.root_hash(2));
@@ -1562,7 +1663,7 @@ mod tests {
         assert_eq!(*tree.get(key2, 2), value3);
         let proof21 = tree.get_proof(key2, 0);
         assert_eq!(proof21.key(), key2);
-        assert_eq!(proof21.value_as_scalar(), value2);
+        assert_eq!(*proof21.value(), value2);
         assert_eq!(proof21.root_hash(), tree.root_hash(0));
         assert_eq!(proof21.root_hash(), tree.root_hash(1));
         assert_ne!(proof21.root_hash(), tree.root_hash(2));
@@ -1571,7 +1672,7 @@ mod tests {
         assert!(proof21.verify(tree.root_hash(2)).is_err());
         let proof22 = tree.get_proof(key2, 2);
         assert_eq!(proof22.key(), key2);
-        assert_eq!(proof22.value_as_scalar(), value3);
+        assert_eq!(*proof22.value(), value3);
         assert_ne!(proof22.root_hash(), tree.root_hash(0));
         assert_ne!(proof22.root_hash(), tree.root_hash(1));
         assert_eq!(proof22.root_hash(), tree.root_hash(2));
@@ -1583,7 +1684,7 @@ mod tests {
 
     #[test]
     fn test_transcode_proof() {
-        let mut tree = AccountBalanceTree::default();
+        let mut tree = TestTree::default();
         let key1 = test_scalar1();
         let key2 = test_scalar2();
         let key3 = test_scalar3();
@@ -1603,24 +1704,16 @@ mod tests {
                 timestamp: None,
                 network_topology_root_hash: None,
                 last_transaction_hash: None,
-                account_balances_root_hash: Some(proto::pallas_scalar_to_bytes32(
-                    tree.root_hash(0),
-                )),
-                staking_balances_root_hash: Some(proto::pallas_scalar_to_bytes32(
-                    utils::parse_pallas_scalar(
-                        "0x3a58ebcf79758fe999e34819d451118b52ca59d7bbaadc089272bc776c9b3694",
-                    ),
-                )),
+                accounts_root_hash: Some(proto::pallas_scalar_to_bytes32(tree.root_hash(0))),
                 program_storage_root_hash: None,
-                account_nonces_root_hash: None,
             })
             .unwrap();
-        assert_eq!(AccountBalanceProof::decode(&proto).unwrap(), proof);
+        assert_eq!(TestProof::decode(&proto).unwrap(), proof);
     }
 
     #[test]
     fn test_decode_and_verify_proof() {
-        let mut tree = AccountBalanceTree::default();
+        let mut tree = TestTree::default();
         let key1 = test_scalar1();
         let key2 = test_scalar2();
         let key3 = test_scalar3();
@@ -1640,27 +1733,19 @@ mod tests {
                 timestamp: None,
                 network_topology_root_hash: None,
                 last_transaction_hash: None,
-                account_balances_root_hash: Some(proto::pallas_scalar_to_bytes32(
-                    tree.root_hash(0),
-                )),
-                staking_balances_root_hash: Some(proto::pallas_scalar_to_bytes32(
-                    utils::parse_pallas_scalar(
-                        "0x3a58ebcf79758fe999e34819d451118b52ca59d7bbaadc089272bc776c9b3694",
-                    ),
-                )),
+                accounts_root_hash: Some(proto::pallas_scalar_to_bytes32(tree.root_hash(0))),
                 program_storage_root_hash: None,
-                account_nonces_root_hash: None,
             })
             .unwrap();
         assert_eq!(
-            AccountBalanceProof::decode_and_verify(&proto, tree.root_hash(0)).unwrap(),
+            TestProof::decode_and_verify(&proto, tree.root_hash(0)).unwrap(),
             proof
         );
     }
 
     #[test]
     fn test_decode_sabotaged_proof() {
-        let mut tree = AccountBalanceTree::default();
+        let mut tree = TestTree::default();
         let key1 = test_scalar1();
         let key2 = test_scalar2();
         let key3 = test_scalar3();
@@ -1680,25 +1765,17 @@ mod tests {
                 timestamp: None,
                 network_topology_root_hash: None,
                 last_transaction_hash: None,
-                account_balances_root_hash: Some(proto::pallas_scalar_to_bytes32(
-                    tree.root_hash(0),
-                )),
-                staking_balances_root_hash: Some(proto::pallas_scalar_to_bytes32(
-                    utils::parse_pallas_scalar(
-                        "0x3a58ebcf79758fe999e34819d451118b52ca59d7bbaadc089272bc776c9b3694",
-                    ),
-                )),
+                accounts_root_hash: Some(proto::pallas_scalar_to_bytes32(tree.root_hash(0))),
                 program_storage_root_hash: None,
-                account_nonces_root_hash: None,
             })
             .unwrap();
         proto.path[123].child_hashes[0] = proto::pallas_scalar_to_bytes32(Scalar::ZERO);
-        assert!(AccountBalanceProof::decode_and_verify(&proto, tree.root_hash(0)).is_err());
+        assert!(TestProof::decode_and_verify(&proto, tree.root_hash(0)).is_err());
     }
 
     #[test]
     fn test_decode_and_verify_sabotaged_proof() {
-        let mut tree = AccountBalanceTree::default();
+        let mut tree = TestTree::default();
         let key1 = test_scalar1();
         let key2 = test_scalar2();
         let key3 = test_scalar3();
@@ -1718,25 +1795,17 @@ mod tests {
                 timestamp: None,
                 network_topology_root_hash: None,
                 last_transaction_hash: None,
-                account_balances_root_hash: Some(proto::pallas_scalar_to_bytes32(
-                    tree.root_hash(0),
-                )),
-                staking_balances_root_hash: Some(proto::pallas_scalar_to_bytes32(
-                    utils::parse_pallas_scalar(
-                        "0x3a58ebcf79758fe999e34819d451118b52ca59d7bbaadc089272bc776c9b3694",
-                    ),
-                )),
+                accounts_root_hash: Some(proto::pallas_scalar_to_bytes32(tree.root_hash(0))),
                 program_storage_root_hash: None,
-                account_nonces_root_hash: None,
             })
             .unwrap();
         proto.path[123].child_hashes[0] = proto::pallas_scalar_to_bytes32(Scalar::ZERO);
-        assert!(AccountBalanceProof::decode_and_verify(&proto, tree.root_hash(0)).is_err());
+        assert!(TestProof::decode_and_verify(&proto, tree.root_hash(0)).is_err());
     }
 
     #[test]
     fn test_decode_invalid_proof() {
-        let mut tree = AccountBalanceTree::default();
+        let mut tree = TestTree::default();
         let key1 = test_scalar1();
         let key2 = test_scalar2();
         let key3 = test_scalar3();
@@ -1756,25 +1825,17 @@ mod tests {
                 timestamp: None,
                 network_topology_root_hash: None,
                 last_transaction_hash: None,
-                account_balances_root_hash: Some(proto::pallas_scalar_to_bytes32(
-                    tree.root_hash(0),
-                )),
-                staking_balances_root_hash: Some(proto::pallas_scalar_to_bytes32(
-                    utils::parse_pallas_scalar(
-                        "0x3a58ebcf79758fe999e34819d451118b52ca59d7bbaadc089272bc776c9b3694",
-                    ),
-                )),
+                accounts_root_hash: Some(proto::pallas_scalar_to_bytes32(tree.root_hash(0))),
                 program_storage_root_hash: None,
-                account_nonces_root_hash: None,
             })
             .unwrap();
         proto.value = None;
-        assert!(AccountBalanceProof::decode(&proto).is_err());
+        assert!(TestProof::decode(&proto).is_err());
     }
 
     #[test]
     fn test_past_modification() {
-        let mut tree = AccountBalanceTree::default();
+        let mut tree = TestTree::default();
         let key1 = test_scalar1();
         let key2 = test_scalar2();
         let key3 = test_scalar3();
@@ -1806,7 +1867,7 @@ mod tests {
 
     #[derive(Debug)]
     struct BinaryLookupCircuit<const H: usize> {
-        merkle_proof: MerkleProof<Scalar, 2, H>,
+        merkle_proof: MerkleProof<Scalar, Scalar, 2, H>,
     }
 
     impl<const H: usize> BinaryLookupCircuit<H> {
@@ -1831,7 +1892,7 @@ mod tests {
             Self {
                 merkle_proof: MerkleProof {
                     key: Scalar::ZERO,
-                    value_as_scalar: Scalar::ZERO,
+                    value: Scalar::ZERO,
                     path: [[Scalar::ZERO; 2]; H],
                     root_hash: Scalar::ZERO,
                 },
@@ -2010,7 +2071,7 @@ mod tests {
 
     #[derive(Debug)]
     struct TernaryLookupCircuit<const H: usize> {
-        merkle_proof: MerkleProof<Scalar, 3, H>,
+        merkle_proof: MerkleProof<Scalar, Scalar, 3, H>,
     }
 
     impl<const H: usize> TernaryLookupCircuit<H> {
@@ -2035,7 +2096,7 @@ mod tests {
             Self {
                 merkle_proof: MerkleProof {
                     key: Scalar::ZERO,
-                    value_as_scalar: Scalar::ZERO,
+                    value: Scalar::ZERO,
                     path: [[Scalar::ZERO; 3]; H],
                     root_hash: Scalar::ZERO,
                 },
