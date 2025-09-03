@@ -27,6 +27,7 @@ pub struct BlockInfo {
     account_balances_root_hash: Scalar,
     staking_balances_root_hash: Scalar,
     program_storage_root_hash: Scalar,
+    account_nonces_root_hash: Scalar,
 }
 
 impl BlockInfo {
@@ -40,6 +41,7 @@ impl BlockInfo {
         account_balances_root_hash: Scalar,
         staking_balances_root_hash: Scalar,
         program_storage_root_hash: Scalar,
+        account_nonces_root_hash: Scalar,
     ) -> Scalar {
         utils::poseidon_hash([
             Scalar::from(chain_id),
@@ -56,6 +58,7 @@ impl BlockInfo {
             account_balances_root_hash,
             staking_balances_root_hash,
             program_storage_root_hash,
+            account_nonces_root_hash,
         ])
     }
 
@@ -69,6 +72,7 @@ impl BlockInfo {
         account_balances_root_hash: Scalar,
         staking_balances_root_hash: Scalar,
         program_storage_root_hash: Scalar,
+        account_nonces_root_hash: Scalar,
     ) -> Self {
         Self {
             hash: Self::hash_block(
@@ -81,6 +85,7 @@ impl BlockInfo {
                 account_balances_root_hash,
                 staking_balances_root_hash,
                 program_storage_root_hash,
+                account_nonces_root_hash,
             ),
             chain_id,
             number: block_number,
@@ -91,6 +96,7 @@ impl BlockInfo {
             account_balances_root_hash,
             staking_balances_root_hash,
             program_storage_root_hash,
+            account_nonces_root_hash,
         }
     }
 
@@ -134,6 +140,10 @@ impl BlockInfo {
         self.program_storage_root_hash
     }
 
+    pub fn account_nonces_root_hash(&self) -> Scalar {
+        self.account_nonces_root_hash
+    }
+
     pub fn encode(&self) -> dotakon::BlockDescriptor {
         dotakon::BlockDescriptor {
             block_hash: Some(proto::pallas_scalar_to_bytes32(self.hash)),
@@ -155,6 +165,9 @@ impl BlockInfo {
             )),
             program_storage_root_hash: Some(proto::pallas_scalar_to_bytes32(
                 self.program_storage_root_hash,
+            )),
+            account_nonces_root_hash: Some(proto::pallas_scalar_to_bytes32(
+                self.account_nonces_root_hash,
             )),
         }
     }
@@ -201,6 +214,11 @@ impl BlockInfo {
                 .program_storage_root_hash
                 .context("program storage root hash field is missing")?,
         )?;
+        let account_nonces_root_hash = proto::pallas_scalar_from_bytes32(
+            &proto
+                .account_nonces_root_hash
+                .context("transaction nonces root hash field is missing")?,
+        )?;
         let block_info = Self::new(
             chain_id,
             block_number,
@@ -211,6 +229,7 @@ impl BlockInfo {
             account_balances_root_hash,
             staking_balances_root_hash,
             program_storage_root_hash,
+            account_nonces_root_hash,
         );
         if block_hash != block_info.hash {
             Err(anyhow!("block hash mismatch"))
@@ -364,6 +383,7 @@ fn make_genesis_block(
 ) -> BlockInfo {
     let block_number = 0;
     let program_storage_root_hash = tree::ProgramStorageTree::default().root_hash(block_number);
+    let account_nonces_root_hash = tree::AccountNoncesTree::default().root_hash(block_number);
     BlockInfo::new(
         chain_id,
         block_number,
@@ -374,6 +394,7 @@ fn make_genesis_block(
         account_balances_root_hash,
         staking_balances_root_hash,
         program_storage_root_hash,
+        account_nonces_root_hash,
     )
 }
 
@@ -387,6 +408,7 @@ struct Repr {
     account_balances: tree::AccountBalanceTree,
     staking_balances: tree::AccountBalanceTree,
     program_storage: tree::ProgramStorageTree,
+    account_nonces: tree::AccountNoncesTree,
 }
 
 impl Repr {
@@ -420,6 +442,7 @@ impl Repr {
             account_balances,
             staking_balances,
             program_storage: tree::ProgramStorageTree::default(),
+            account_nonces: tree::AccountNoncesTree::default(),
         })
     }
 
@@ -551,6 +574,17 @@ impl Repr {
                 self.chain_id
             ));
         }
+        let block_number = self.current_version();
+        let nonce = payload.nonce();
+        let latest_nonce = *self.account_nonces.get(signer, block_number);
+        if nonce <= latest_nonce {
+            return Err(anyhow!(
+                "invalid nonce {} (latest for {:#x} is {})",
+                nonce,
+                utils::pallas_scalar_to_u256(signer),
+                latest_nonce,
+            ));
+        }
         match &payload.transaction {
             Some(dotakon::transaction::payload::Transaction::SendCoins(payload)) => {
                 self.apply_send_coins_transaction(signer, payload)
@@ -559,7 +593,9 @@ impl Repr {
                 unimplemented!()
             }
             None => Err(anyhow!("invalid transaction payload")),
-        }
+        }?;
+        self.account_nonces.put(signer, nonce, block_number);
+        Ok(())
     }
 
     fn add_transaction(&mut self, transaction: &dotakon::Transaction) -> Result<Scalar> {
@@ -591,6 +627,7 @@ impl Repr {
         let account_balances_root_hash = self.account_balances.root_hash(block_number);
         let staking_balances_root_hash = self.staking_balances.root_hash(block_number);
         let program_storage_root_hash = self.program_storage.root_hash(block_number);
+        let account_nonces_root_hash = self.account_nonces.root_hash(block_number);
         let block = BlockInfo::new(
             self.chain_id,
             block_number,
@@ -601,6 +638,7 @@ impl Repr {
             account_balances_root_hash,
             staking_balances_root_hash,
             program_storage_root_hash,
+            account_nonces_root_hash,
         );
         let block_hash = block.hash();
         self.blocks.push(block);
@@ -763,7 +801,7 @@ mod tests {
 
     fn default_genesis_block_hash() -> Scalar {
         utils::u256_to_pallas_scalar(
-            "0x24b2e9d8d308a17904d117c9f803070ba398cf300845adb572c9b43d07d607fc"
+            "0x1fd648f9346ee50789d7abed3554e70990c0c180ad00d0d0228066d6e072d794"
                 .parse()
                 .unwrap(),
         )
@@ -799,6 +837,11 @@ mod tests {
         ])
         .unwrap();
         let program_storage_root_hash = Scalar::from_repr_vartime([
+            8u8, 7, 6, 5, 4, 3, 2, 1, 16, 15, 14, 13, 12, 11, 10, 9, 8, 9, 10, 11, 12, 13, 14, 15,
+            1, 2, 3, 4, 5, 6, 7, 0,
+        ])
+        .unwrap();
+        let account_nonces_root_hash = Scalar::from_repr_vartime([
             16u8, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
             11, 12, 13, 14, 15, 16, 0,
         ])
@@ -813,6 +856,7 @@ mod tests {
             account_balances_root_hash,
             staking_balances_root_hash,
             program_storage_root_hash,
+            account_nonces_root_hash,
         );
         assert_ne!(
             block,
@@ -827,7 +871,7 @@ mod tests {
         assert_eq!(
             block.hash(),
             utils::parse_pallas_scalar(
-                "0x32bdf50de7f54fac47cc48e2b94ec450d1e1668bde9cd6ae0a6ef8e2768d77b4"
+                "0x1ac5468d59d1429ee45174ef07c8b6cdf441545809164b8bdc8bb8163d26b009"
             )
         );
         assert_eq!(block.chain_id(), TEST_CHAIN_ID);
@@ -848,6 +892,7 @@ mod tests {
             staking_balances_root_hash
         );
         assert_eq!(block.program_storage_root_hash(), program_storage_root_hash);
+        assert_eq!(block.account_nonces_root_hash(), account_nonces_root_hash);
         assert_eq!(BlockInfo::decode(&block.encode()).unwrap(), block);
     }
 
@@ -887,6 +932,12 @@ mod tests {
             block.program_storage_root_hash(),
             utils::parse_pallas_scalar(
                 "0x297401934d5cc4d84e639092ccb6f336faae9fc1c54cd4e23ef2561f8c63f683"
+            )
+        );
+        assert_eq!(
+            block.account_nonces_root_hash(),
+            utils::parse_pallas_scalar(
+                "0x3a58ebcf79758fe999e34819d451118b52ca59d7bbaadc089272bc776c9b3694"
             )
         );
         assert_eq!(BlockInfo::decode(&block.encode()).unwrap(), block);
@@ -1312,7 +1363,7 @@ mod tests {
         )
         .unwrap();
         let block_hash = utils::parse_pallas_scalar(
-            "0x23f8aa8165249b294a389d8ec55baa238b4880c11131dd1341d614f4ab484022",
+            "0x0a495ef194ce702e89d4794aa2ffc4bd03c1ae4c53503102716ea9fa55422311",
         );
         let (block, proof) = db
             .get_latest_staking_balance(account_address1)
@@ -1357,7 +1408,7 @@ mod tests {
         )
         .unwrap();
         let block_hash = utils::parse_pallas_scalar(
-            "0x23f8aa8165249b294a389d8ec55baa238b4880c11131dd1341d614f4ab484022",
+            "0x0a495ef194ce702e89d4794aa2ffc4bd03c1ae4c53503102716ea9fa55422311",
         );
         let (block, proof) = db
             .get_staking_balance(account_address1, block_hash)
@@ -1402,7 +1453,7 @@ mod tests {
         )
         .unwrap();
         let block_hash = utils::parse_pallas_scalar(
-            "0x23f8aa8165249b294a389d8ec55baa238b4880c11131dd1341d614f4ab484022",
+            "0x0a495ef194ce702e89d4794aa2ffc4bd03c1ae4c53503102716ea9fa55422311",
         );
         let (block, proof) = db.get_latest_balance(account_address1).await.unwrap();
         assert_eq!(block.hash(), block_hash);
@@ -1436,7 +1487,7 @@ mod tests {
         assert_eq!(
             db.close_block().await.hash(),
             utils::parse_pallas_scalar(
-                "0x3b9a5a339d073efca5d4fc4dfd811441b21d7adb82b7b1a0abfb54ff51a17f7f"
+                "0x15e4ec5a04b7f9b7a09dea467b4dc9ce4f2d57ff9993a46b4e1c617695c49211"
             )
         );
         assert_eq!(db.current_version().await, 2);
@@ -1489,7 +1540,7 @@ mod tests {
         assert_eq!(
             db.close_block().await.hash(),
             utils::parse_pallas_scalar(
-                "0x08a0dd59c1695cc882fc36d1c5fb9b5e27e59acc194be6b1d350efcdb29e4b63"
+                "0x195c523157e77ff787b11c382d04f86dd246439ef8a2527b924f619ee68f989a"
             )
         );
         assert_eq!(db.current_version().await, 2);
@@ -1558,7 +1609,7 @@ mod tests {
         assert_eq!(
             db.close_block().await.hash(),
             utils::parse_pallas_scalar(
-                "0x24ef7d6a05b7cbe6a51c9d2519356eab07f9d543c021cb46947a41a501faa761"
+                "0x13bf314f5ad4a4483046e841e6b98e53f009070d4331b91bac90735eacc42086"
             )
         );
         assert_eq!(db.current_version().await, 2);
@@ -1610,7 +1661,7 @@ mod tests {
         assert_eq!(
             db.close_block().await.hash(),
             utils::parse_pallas_scalar(
-                "0x3b9a5a339d073efca5d4fc4dfd811441b21d7adb82b7b1a0abfb54ff51a17f7f"
+                "0x15e4ec5a04b7f9b7a09dea467b4dc9ce4f2d57ff9993a46b4e1c617695c49211"
             )
         );
         assert_eq!(db.current_version().await, 2);
@@ -1623,6 +1674,210 @@ mod tests {
         assert_eq!(proof.value_as_scalar(), Scalar::from(321));
         let (_, proof) = db.get_balance(address2, block_hash2).await.unwrap();
         assert_eq!(proof.value_as_scalar(), Scalar::from(100));
+    }
+
+    #[tokio::test]
+    async fn test_reject_transaction_with_invalid_nonce1() {
+        let (secret_key, public_key1, _) = utils::testing_keys2();
+        let address1 = utils::public_key_to_wallet_address(public_key1);
+        let key_manager = keys::KeyManager::new(secret_key);
+        let (_, public_key2, _) = utils::testing_keys3();
+        let address2 = utils::public_key_to_wallet_address(public_key2);
+        let clock = mock_clock(SystemTime::UNIX_EPOCH + Duration::from_secs(71104));
+        let db = Db::new(
+            clock,
+            TEST_CHAIN_ID,
+            testing_identity(),
+            [(address1, Scalar::from(321)), (address2, Scalar::from(100))],
+        )
+        .unwrap();
+        let signature_nonce = H256::from_slice(&[
+            1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+            24, 25, 26, 27, 28, 29, 30, 31, 0,
+        ]);
+        assert!(
+            db.add_transaction(
+                &Transaction::make_coin_transfer_proto(
+                    &key_manager,
+                    signature_nonce,
+                    TEST_CHAIN_ID,
+                    10,
+                    address2,
+                    Scalar::from(123)
+                )
+                .unwrap()
+            )
+            .await
+            .is_ok()
+        );
+        assert!(
+            db.add_transaction(
+                &Transaction::make_coin_transfer_proto(
+                    &key_manager,
+                    signature_nonce,
+                    TEST_CHAIN_ID,
+                    9,
+                    address2,
+                    Scalar::from(123)
+                )
+                .unwrap()
+            )
+            .await
+            .is_err()
+        );
+        let block_hash1 = db.get_latest_block().await.hash();
+        assert_eq!(
+            db.close_block().await.hash(),
+            utils::parse_pallas_scalar(
+                "0x3a8f5a988eb534c4cc5f96bf048db0c6afc6e84d4080838546b33b7d754e2095"
+            )
+        );
+        assert_eq!(db.current_version().await, 2);
+        let block_hash2 = db.get_latest_block().await.hash();
+        let (_, proof) = db.get_balance(address1, block_hash1).await.unwrap();
+        assert_eq!(proof.value_as_scalar(), Scalar::from(321));
+        let (_, proof) = db.get_balance(address2, block_hash1).await.unwrap();
+        assert_eq!(proof.value_as_scalar(), Scalar::from(100));
+        let (_, proof) = db.get_balance(address1, block_hash2).await.unwrap();
+        assert_eq!(proof.value_as_scalar(), Scalar::from(198));
+        let (_, proof) = db.get_balance(address2, block_hash2).await.unwrap();
+        assert_eq!(proof.value_as_scalar(), Scalar::from(223));
+    }
+
+    #[tokio::test]
+    async fn test_reject_transaction_with_invalid_nonce2() {
+        let (secret_key, public_key1, _) = utils::testing_keys2();
+        let address1 = utils::public_key_to_wallet_address(public_key1);
+        let key_manager = keys::KeyManager::new(secret_key);
+        let (_, public_key2, _) = utils::testing_keys3();
+        let address2 = utils::public_key_to_wallet_address(public_key2);
+        let clock = mock_clock(SystemTime::UNIX_EPOCH + Duration::from_secs(71104));
+        let db = Db::new(
+            clock,
+            TEST_CHAIN_ID,
+            testing_identity(),
+            [(address1, Scalar::from(321)), (address2, Scalar::from(100))],
+        )
+        .unwrap();
+        let signature_nonce = H256::from_slice(&[
+            1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+            24, 25, 26, 27, 28, 29, 30, 31, 0,
+        ]);
+        assert!(
+            db.add_transaction(
+                &Transaction::make_coin_transfer_proto(
+                    &key_manager,
+                    signature_nonce,
+                    TEST_CHAIN_ID,
+                    10,
+                    address2,
+                    Scalar::from(123)
+                )
+                .unwrap()
+            )
+            .await
+            .is_ok()
+        );
+        assert!(
+            db.add_transaction(
+                &Transaction::make_coin_transfer_proto(
+                    &key_manager,
+                    signature_nonce,
+                    TEST_CHAIN_ID,
+                    10,
+                    address2,
+                    Scalar::from(123)
+                )
+                .unwrap()
+            )
+            .await
+            .is_err()
+        );
+        let block_hash1 = db.get_latest_block().await.hash();
+        assert_eq!(
+            db.close_block().await.hash(),
+            utils::parse_pallas_scalar(
+                "0x3a8f5a988eb534c4cc5f96bf048db0c6afc6e84d4080838546b33b7d754e2095"
+            )
+        );
+        assert_eq!(db.current_version().await, 2);
+        let block_hash2 = db.get_latest_block().await.hash();
+        let (_, proof) = db.get_balance(address1, block_hash1).await.unwrap();
+        assert_eq!(proof.value_as_scalar(), Scalar::from(321));
+        let (_, proof) = db.get_balance(address2, block_hash1).await.unwrap();
+        assert_eq!(proof.value_as_scalar(), Scalar::from(100));
+        let (_, proof) = db.get_balance(address1, block_hash2).await.unwrap();
+        assert_eq!(proof.value_as_scalar(), Scalar::from(198));
+        let (_, proof) = db.get_balance(address2, block_hash2).await.unwrap();
+        assert_eq!(proof.value_as_scalar(), Scalar::from(223));
+    }
+
+    #[tokio::test]
+    async fn test_new_transaction_with_valid_nonce() {
+        let (secret_key, public_key1, _) = utils::testing_keys2();
+        let address1 = utils::public_key_to_wallet_address(public_key1);
+        let key_manager = keys::KeyManager::new(secret_key);
+        let (_, public_key2, _) = utils::testing_keys3();
+        let address2 = utils::public_key_to_wallet_address(public_key2);
+        let clock = mock_clock(SystemTime::UNIX_EPOCH + Duration::from_secs(71104));
+        let db = Db::new(
+            clock,
+            TEST_CHAIN_ID,
+            testing_identity(),
+            [(address1, Scalar::from(321)), (address2, Scalar::from(100))],
+        )
+        .unwrap();
+        let signature_nonce = H256::from_slice(&[
+            1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+            24, 25, 26, 27, 28, 29, 30, 31, 0,
+        ]);
+        assert!(
+            db.add_transaction(
+                &Transaction::make_coin_transfer_proto(
+                    &key_manager,
+                    signature_nonce,
+                    TEST_CHAIN_ID,
+                    10,
+                    address2,
+                    Scalar::from(123)
+                )
+                .unwrap()
+            )
+            .await
+            .is_ok()
+        );
+        assert!(
+            db.add_transaction(
+                &Transaction::make_coin_transfer_proto(
+                    &key_manager,
+                    signature_nonce,
+                    TEST_CHAIN_ID,
+                    11,
+                    address2,
+                    Scalar::from(123)
+                )
+                .unwrap()
+            )
+            .await
+            .is_ok()
+        );
+        let block_hash1 = db.get_latest_block().await.hash();
+        assert_eq!(
+            db.close_block().await.hash(),
+            utils::parse_pallas_scalar(
+                "0x2ed30c56eb90f6388ea8d91d8c9b4df91f19b6c9aae44a22c2548b50a648d2b8"
+            )
+        );
+        assert_eq!(db.current_version().await, 2);
+        let block_hash2 = db.get_latest_block().await.hash();
+        let (_, proof) = db.get_balance(address1, block_hash1).await.unwrap();
+        assert_eq!(proof.value_as_scalar(), Scalar::from(321));
+        let (_, proof) = db.get_balance(address2, block_hash1).await.unwrap();
+        assert_eq!(proof.value_as_scalar(), Scalar::from(100));
+        let (_, proof) = db.get_balance(address1, block_hash2).await.unwrap();
+        assert_eq!(proof.value_as_scalar(), Scalar::from(75));
+        let (_, proof) = db.get_balance(address2, block_hash2).await.unwrap();
+        assert_eq!(proof.value_as_scalar(), Scalar::from(346));
     }
 
     // TODO

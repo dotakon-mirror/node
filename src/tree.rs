@@ -1008,6 +1008,9 @@ pub type AccountBalanceProof = MerkleProof<Scalar, 3, 161>;
 pub type ProgramStorageTree = MerkleTree<Scalar, MerkleTreeVersion<u64, u64, 2, 64>, 3, 161>;
 pub type ProgramStorageProof = MerkleProof<u64, 2, 64>;
 
+pub type AccountNoncesTree = MerkleTree<Scalar, u64, 3, 161>;
+pub type AccountNonceProof = MerkleProof<Scalar, 3, 161>;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1609,6 +1612,7 @@ mod tests {
                     ),
                 )),
                 program_storage_root_hash: None,
+                account_nonces_root_hash: None,
             })
             .unwrap();
         assert_eq!(AccountBalanceProof::decode(&proto).unwrap(), proof);
@@ -1645,6 +1649,7 @@ mod tests {
                     ),
                 )),
                 program_storage_root_hash: None,
+                account_nonces_root_hash: None,
             })
             .unwrap();
         assert_eq!(
@@ -1684,6 +1689,7 @@ mod tests {
                     ),
                 )),
                 program_storage_root_hash: None,
+                account_nonces_root_hash: None,
             })
             .unwrap();
         proto.path[123].child_hashes[0] = proto::pallas_scalar_to_bytes32(Scalar::ZERO);
@@ -1721,6 +1727,7 @@ mod tests {
                     ),
                 )),
                 program_storage_root_hash: None,
+                account_nonces_root_hash: None,
             })
             .unwrap();
         proto.path[123].child_hashes[0] = proto::pallas_scalar_to_bytes32(Scalar::ZERO);
@@ -1758,6 +1765,7 @@ mod tests {
                     ),
                 )),
                 program_storage_root_hash: None,
+                account_nonces_root_hash: None,
             })
             .unwrap();
         proto.value = None;

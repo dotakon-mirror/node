@@ -135,13 +135,6 @@ impl NodeServiceImpl {
         self.key_manager.sign_message(message, get_random())
     }
 
-    fn verify_signed_message(
-        payload: &prost_types::Any,
-        signature: &dotakon::Signature,
-    ) -> anyhow::Result<()> {
-        keys::KeyManager::verify_signed_message(payload, signature)
-    }
-
     fn start_block_timer(self: Arc<Self>) {
         tokio::spawn(async move {
             loop {
@@ -315,6 +308,13 @@ impl NodeService {
             )?,
         })
     }
+
+    fn sign_message<M: prost::Message + prost::Name>(
+        &self,
+        message: &M,
+    ) -> anyhow::Result<(prost_types::Any, dotakon::Signature)> {
+        self.inner.sign_message(message)
+    }
 }
 
 #[tonic::async_trait]
@@ -324,7 +324,6 @@ impl NodeServiceV1 for NodeService {
         _request: Request<dotakon::GetIdentityRequest>,
     ) -> Result<Response<dotakon::NodeIdentity>, Status> {
         let (payload, signature) = self
-            .inner
             .sign_message(&self.inner.identity)
             .map_err(|_| Status::internal("signature error"))?;
         Ok(Response::new(dotakon::NodeIdentity {
@@ -338,32 +337,8 @@ impl NodeServiceV1 for NodeService {
         request: Request<dotakon::GetBlockRequest>,
     ) -> Result<Response<dotakon::GetBlockResponse>, Status> {
         let block_info = self.inner.get_block_impl(request.get_ref()).await?;
-        let descriptor = dotakon::BlockDescriptor {
-            block_hash: Some(proto::pallas_scalar_to_bytes32(block_info.hash())),
-            chain_id: Some(block_info.chain_id()),
-            block_number: Some(block_info.number()),
-            previous_block_hash: Some(proto::pallas_scalar_to_bytes32(
-                block_info.previous_block_hash(),
-            )),
-            timestamp: Some(block_info.timestamp().into()),
-            network_topology_root_hash: Some(proto::pallas_scalar_to_bytes32(
-                block_info.network_topology_root_hash(),
-            )),
-            last_transaction_hash: Some(proto::pallas_scalar_to_bytes32(
-                block_info.last_transaction_hash(),
-            )),
-            account_balances_root_hash: Some(proto::pallas_scalar_to_bytes32(
-                block_info.account_balances_root_hash(),
-            )),
-            staking_balances_root_hash: Some(proto::pallas_scalar_to_bytes32(
-                block_info.staking_balances_root_hash(),
-            )),
-            program_storage_root_hash: Some(proto::pallas_scalar_to_bytes32(
-                block_info.program_storage_root_hash(),
-            )),
-        };
+        let descriptor = block_info.encode();
         let (payload, signature) = self
-            .inner
             .sign_message(&descriptor)
             .map_err(|_| Status::internal("signature error"))?;
         Ok(Response::new(dotakon::GetBlockResponse {
@@ -385,7 +360,6 @@ impl NodeServiceV1 for NodeService {
     ) -> Result<Response<dotakon::GetTransactionResponse>, Status> {
         let transaction = self.inner.get_transaction_impl(request.get_ref()).await?;
         let (payload, signature) = self
-            .inner
             .sign_message(&transaction)
             .map_err(|_| Status::internal("internal error"))?;
         Ok(Response::new(dotakon::GetTransactionResponse {
@@ -406,7 +380,6 @@ impl NodeServiceV1 for NodeService {
             .encode(block_info.encode())
             .map_err(|_| Status::internal("internal error"))?;
         let (payload, signature) = self
-            .inner
             .sign_message(&payload)
             .map_err(|_| Status::internal("signature error"))?;
         Ok(Response::new(dotakon::GetAccountBalanceResponse {
@@ -427,7 +400,6 @@ impl NodeServiceV1 for NodeService {
             .encode(block_info.encode())
             .map_err(|_| Status::internal("internal error"))?;
         let (payload, signature) = self
-            .inner
             .sign_message(&payload)
             .map_err(|_| Status::internal("signature error"))?;
         Ok(Response::new(dotakon::GetStakingBalanceResponse {
@@ -615,7 +587,7 @@ mod tests {
 
     fn default_genesis_block_hash() -> Scalar {
         utils::u256_to_pallas_scalar(
-            "0x24b2e9d8d308a17904d117c9f803070ba398cf300845adb572c9b43d07d607fc"
+            "0x1fd648f9346ee50789d7abed3554e70990c0c180ad00d0d0228066d6e072d794"
                 .parse()
                 .unwrap(),
         )
@@ -910,7 +882,7 @@ mod tests {
         assert_eq!(
             block_info.hash(),
             utils::parse_pallas_scalar(
-                "0x32c1d7f74f3301d81568aa0b88dcf4e3ffa15d124aacf861079e4ba23dadb4db"
+                "0x06099fdf74429c1830cb66e2e8d652facc1c15037b7613bf34622882f768ac1d"
             )
         );
 
@@ -1028,7 +1000,7 @@ mod tests {
         assert_eq!(
             proto::pallas_scalar_from_bytes32(&payload.block_hash.unwrap()).unwrap(),
             utils::parse_pallas_scalar(
-                "0x3a5989f10ab4a6bd7d24062c63187c29a0cefdf74a35c6a6eb0a3a15028c42b9"
+                "0x189a0944beae1fbbaf0c8329bc3deae97ebca0c26f97af915430de721af037d5"
             )
         );
     }
