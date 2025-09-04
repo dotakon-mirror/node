@@ -1,6 +1,6 @@
 use crate::chips;
 use crate::dotakon;
-use crate::proto::{self, AnyProto};
+use crate::proto::{self, DecodeFromAny, EncodeToAny};
 use crate::utils;
 use crate::xits;
 use anyhow::{Result, anyhow};
@@ -72,7 +72,7 @@ impl FromScalar for u64 {
 
 trait Node<
     K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
-    V: Debug + Default + Clone + Send + Sync + AsScalar + AnyProto + 'static,
+    V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
     const W: usize,
 >: Debug + Send + Sync + AsScalar + 'static
 {
@@ -84,7 +84,7 @@ trait Node<
 #[derive(Debug)]
 struct PhantomNodes<
     K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
-    V: Debug + Default + Clone + Send + Sync + AsScalar + AnyProto + 'static,
+    V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
     const W: usize,
     const H: usize,
 > {
@@ -93,7 +93,7 @@ struct PhantomNodes<
 
 impl<
     K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
-    V: Debug + Default + Clone + Send + Sync + AsScalar + AnyProto + 'static,
+    V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
     const W: usize,
     const H: usize,
 > PhantomNodes<K, V, W, H>
@@ -105,7 +105,7 @@ impl<
 
 impl<
     K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
-    V: Debug + Default + Clone + Send + Sync + AsScalar + AnyProto + 'static,
+    V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
     const H: usize,
 > Default for PhantomNodes<K, V, 2, H>
 {
@@ -123,7 +123,7 @@ impl<
 
 impl<
     K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
-    V: Debug + Default + Clone + Send + Sync + AsScalar + AnyProto + 'static,
+    V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
     const H: usize,
 > Default for PhantomNodes<K, V, 3, H>
 {
@@ -150,7 +150,7 @@ struct MonomorphicPhantomNodes {
 impl MonomorphicPhantomNodes {
     fn get<
         K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
-        V: Debug + Default + Clone + Send + Sync + AsScalar + AnyProto + 'static,
+        V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
         const W: usize,
         const H: usize,
     >(
@@ -198,11 +198,11 @@ static PHANTOM_NODES: LazyLock<MonomorphicPhantomNodes> =
     LazyLock::new(|| MonomorphicPhantomNodes::default());
 
 #[derive(Debug, Clone)]
-struct Leaf<V: Debug + Default + Clone + Send + Sync + AsScalar + AnyProto + 'static> {
+struct Leaf<V: Debug + Default + Clone + Send + Sync + AsScalar + 'static> {
     value: V,
 }
 
-impl<V: Debug + Default + Clone + Send + Sync + AsScalar + AnyProto + 'static> Leaf<V> {
+impl<V: Debug + Default + Clone + Send + Sync + AsScalar + 'static> Leaf<V> {
     fn new(value: V) -> Self {
         Self { value }
     }
@@ -210,7 +210,7 @@ impl<V: Debug + Default + Clone + Send + Sync + AsScalar + AnyProto + 'static> L
 
 impl<
     K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
-    V: Debug + Default + Clone + Send + Sync + AsScalar + AnyProto + 'static,
+    V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
     const W: usize,
 > Node<K, V, W> for Leaf<V>
 {
@@ -231,9 +231,7 @@ impl<
     }
 }
 
-impl<V: Debug + Default + Clone + Send + Sync + AsScalar + AnyProto + 'static> AsScalar
-    for Leaf<V>
-{
+impl<V: Debug + Default + Clone + Send + Sync + AsScalar + 'static> AsScalar for Leaf<V> {
     fn as_scalar(&self) -> Scalar {
         self.value.as_scalar()
     }
@@ -242,7 +240,7 @@ impl<V: Debug + Default + Clone + Send + Sync + AsScalar + AnyProto + 'static> A
 #[derive(Debug, Clone)]
 struct InternalNode<
     K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
-    V: Debug + Default + Clone + Send + Sync + AsScalar + AnyProto + 'static,
+    V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
     const W: usize,
 > {
     // TODO: convert `level` to a generic const argument when Rust supports generic const argument
@@ -254,7 +252,7 @@ struct InternalNode<
 
 impl<
     K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
-    V: Debug + Default + Clone + Send + Sync + AsScalar + AnyProto + 'static,
+    V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
     const W: usize,
 > InternalNode<K, V, W>
 {
@@ -281,7 +279,7 @@ impl<
 
 impl<
     K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
-    V: Debug + Default + Clone + Send + Sync + AsScalar + AnyProto + 'static,
+    V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
 > InternalNode<K, V, 2>
 {
     fn get_bit(&self, key: K) -> usize {
@@ -293,7 +291,7 @@ impl<
 
 impl<
     K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
-    V: Debug + Default + Clone + Send + Sync + AsScalar + AnyProto + 'static,
+    V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
 > Node<K, V, 2> for InternalNode<K, V, 2>
 {
     fn get(&self, key: K) -> &V {
@@ -321,7 +319,7 @@ impl<
 
 impl<
     K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
-    V: Debug + Default + Clone + Send + Sync + AsScalar + AnyProto + 'static,
+    V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
 > InternalNode<K, V, 3>
 {
     fn get_trit(&self, key: K) -> usize {
@@ -333,7 +331,7 @@ impl<
 
 impl<
     K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
-    V: Debug + Default + Clone + Send + Sync + AsScalar + AnyProto + 'static,
+    V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
 > Node<K, V, 3> for InternalNode<K, V, 3>
 {
     fn get(&self, key: K) -> &V {
@@ -361,7 +359,7 @@ impl<
 
 impl<
     K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
-    V: Debug + Default + Clone + Send + Sync + AsScalar + AnyProto + 'static,
+    V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
     const W: usize,
 > AsScalar for InternalNode<K, V, W>
 {
@@ -373,7 +371,7 @@ impl<
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MerkleProof<
     K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
-    V: Debug + Default + Clone + Send + Sync + AsScalar + AnyProto + 'static,
+    V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
     const W: usize,
     const H: usize,
 > {
@@ -385,7 +383,7 @@ pub struct MerkleProof<
 
 impl<
     K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
-    V: Debug + Default + Clone + Send + Sync + AsScalar + AnyProto + 'static,
+    V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
     const W: usize,
     const H: usize,
 > MerkleProof<K, V, W, H>
@@ -409,7 +407,7 @@ impl<
 
 impl<
     K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
-    V: Debug + Default + Clone + Send + Sync + AsScalar + AnyProto + 'static,
+    V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
     const H: usize,
 > MerkleProof<K, V, 2, H>
 {
@@ -450,7 +448,7 @@ impl<
 
 impl<
     K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
-    V: Debug + Default + Clone + Send + Sync + AsScalar + AnyProto + 'static,
+    V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
     const H: usize,
 > MerkleProof<K, V, 3, H>
 {
@@ -492,7 +490,7 @@ impl<
 
 impl<
     K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
-    V: Debug + Default + Clone + Send + Sync + AsScalar + AnyProto + 'static,
+    V: Debug + Default + Clone + Send + Sync + AsScalar + EncodeToAny + 'static,
     const W: usize,
     const H: usize,
 > MerkleProof<K, V, W, H>
@@ -516,7 +514,15 @@ impl<
                 .collect(),
         })
     }
+}
 
+impl<
+    K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
+    V: Debug + Default + Clone + Send + Sync + AsScalar + DecodeFromAny + 'static,
+    const W: usize,
+    const H: usize,
+> MerkleProof<K, V, W, H>
+{
     /// Decodes a Merkle proof from the provided protobuf. The `block_descriptor` is ignored. The
     /// resulting proof is not verified (use `decode_and_verify` to decode and verify it).
     pub fn decode(proto: &dotakon::MerkleProof) -> Result<Self> {
@@ -567,7 +573,7 @@ impl<
 
 impl<
     K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
-    V: Debug + Default + Clone + Send + Sync + AsScalar + AnyProto + 'static,
+    V: Debug + Default + Clone + Send + Sync + AsScalar + DecodeFromAny + 'static,
     const H: usize,
 > MerkleProof<K, V, 2, H>
 {
@@ -586,7 +592,7 @@ impl<
 
 impl<
     K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
-    V: Debug + Default + Clone + Send + Sync + AsScalar + AnyProto + 'static,
+    V: Debug + Default + Clone + Send + Sync + AsScalar + DecodeFromAny + 'static,
     const H: usize,
 > MerkleProof<K, V, 3, H>
 {
@@ -660,7 +666,7 @@ impl<const H: usize> BinaryLookupChip<H> {
 
     pub fn assign<
         K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
-        V: Debug + Default + Clone + Send + Sync + AsScalar + AnyProto + 'static,
+        V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
     >(
         &self,
         layouter: &mut impl circuit::Layouter<Scalar>,
@@ -813,7 +819,7 @@ impl<const H: usize> TernaryLookupChip<H> {
 
     pub fn assign<
         K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
-        V: Debug + Default + Clone + Send + Sync + AsScalar + AnyProto + 'static,
+        V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
     >(
         &self,
         layouter: &mut impl circuit::Layouter<Scalar>,
@@ -898,7 +904,7 @@ impl<const H: usize> circuit::Chip<Scalar> for TernaryLookupChip<H> {
 #[derive(Debug, Clone)]
 pub struct MerkleTreeVersion<
     K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
-    V: Debug + Default + Clone + Send + Sync + AsScalar + AnyProto + 'static,
+    V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
     const W: usize,
     const H: usize,
 > {
@@ -907,7 +913,7 @@ pub struct MerkleTreeVersion<
 
 impl<
     K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
-    V: Debug + Default + Clone + Send + Sync + AsScalar + AnyProto + 'static,
+    V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
     const W: usize,
     const H: usize,
 > MerkleTreeVersion<K, V, W, H>
@@ -947,7 +953,7 @@ impl<
 
 impl<
     K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
-    V: Debug + Default + Clone + Send + Sync + AsScalar + AnyProto + 'static,
+    V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
     const W: usize,
     const H: usize,
 > Default for MerkleTreeVersion<K, V, W, H>
@@ -961,7 +967,7 @@ impl<
 
 impl<
     K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
-    V: Debug + Default + Clone + Send + Sync + AsScalar + AnyProto + 'static,
+    V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
     const W: usize,
     const H: usize,
 > AsScalar for MerkleTreeVersion<K, V, W, H>
@@ -973,29 +979,22 @@ impl<
 
 impl<
     K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
-    V: Debug + Default + Clone + Send + Sync + AsScalar + AnyProto + 'static,
+    V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
     const W: usize,
     const H: usize,
-> AnyProto for MerkleTreeVersion<K, V, W, H>
+> EncodeToAny for MerkleTreeVersion<K, V, W, H>
 {
     fn encode_to_any(&self) -> Result<prost_types::Any> {
         Ok(prost_types::Any::from_msg(
             &proto::pallas_scalar_to_bytes32(self.root_hash()),
         )?)
     }
-
-    fn decode_from_any(_proto: &prost_types::Any) -> Result<Self> {
-        // TODO: split `AnyProto` in two: `EncodeToAny` and `DecodeFromAny`. This way they can be
-        // implemented selectively so that these errors are detected at compile time and we avoid
-        // crashing with `unimplemented!()`.
-        unimplemented!()
-    }
 }
 
 #[derive(Debug, Clone)]
 pub struct MerkleTree<
     K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
-    V: Debug + Default + Clone + Send + Sync + AsScalar + AnyProto + 'static,
+    V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
     const W: usize,
     const H: usize,
 > {
@@ -1004,7 +1003,7 @@ pub struct MerkleTree<
 
 impl<
     K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
-    V: Debug + Default + Clone + Send + Sync + AsScalar + AnyProto + 'static,
+    V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
     const W: usize,
     const H: usize,
 > MerkleTree<K, V, W, H>
@@ -1046,7 +1045,7 @@ impl<
 
 impl<
     K: Debug + Copy + Send + Sync + FromScalar + Into<Scalar> + 'static,
-    V: Debug + Default + Clone + Send + Sync + AsScalar + AnyProto + 'static,
+    V: Debug + Default + Clone + Send + Sync + AsScalar + 'static,
     const W: usize,
     const H: usize,
 > Default for MerkleTree<K, V, W, H>
@@ -1081,7 +1080,7 @@ impl AsScalar for AccountInfo {
     }
 }
 
-impl AnyProto for AccountInfo {
+impl EncodeToAny for AccountInfo {
     fn encode_to_any(&self) -> Result<prost_types::Any> {
         Ok(prost_types::Any::from_msg(&dotakon::AccountInfo {
             last_nonce: Some(self.last_nonce),
@@ -1089,7 +1088,9 @@ impl AnyProto for AccountInfo {
             staking_balance: Some(proto::pallas_scalar_to_bytes32(self.staking_balance)),
         })?)
     }
+}
 
+impl DecodeFromAny for AccountInfo {
     fn decode_from_any(proto: &prost_types::Any) -> Result<Self> {
         let proto = proto.to_msg::<dotakon::AccountInfo>()?;
         Ok(Self {

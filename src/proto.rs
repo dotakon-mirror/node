@@ -39,31 +39,39 @@ dotakon_proto_name!(dotakon::MerkleProof, "MerkleProof");
 dotakon_proto_name!(dotakon::node_identity::Payload, "NodeIdentity.Payload");
 dotakon_proto_name!(dotakon::transaction::Payload, "Transaction.Payload");
 
-/// Makes a type transcodable to and from `google.protobuf.Any`.
-pub trait AnyProto: Sized {
+/// Makes a type encodable to `google.protobuf.Any`.
+pub trait EncodeToAny: Sized {
     fn encode_to_any(&self) -> Result<prost_types::Any>;
-    fn decode_from_any(proto: &prost_types::Any) -> Result<Self>;
 }
 
-impl AnyProto for Scalar {
+impl EncodeToAny for Scalar {
     fn encode_to_any(&self) -> Result<prost_types::Any> {
         Ok(prost_types::Any::from_msg(&pallas_scalar_to_bytes32(
             *self,
         ))?)
     }
-
-    fn decode_from_any(proto: &prost_types::Any) -> Result<Self> {
-        pallas_scalar_from_bytes32(&proto.to_msg()?)
-    }
 }
 
-impl AnyProto for u64 {
+impl EncodeToAny for u64 {
     fn encode_to_any(&self) -> Result<prost_types::Any> {
         Ok(prost_types::Any::from_msg(&pallas_scalar_to_bytes32(
             Scalar::from(*self),
         ))?)
     }
+}
 
+/// Makes a type decodable from `google.protobuf.Any`.
+pub trait DecodeFromAny: Sized {
+    fn decode_from_any(proto: &prost_types::Any) -> Result<Self>;
+}
+
+impl DecodeFromAny for Scalar {
+    fn decode_from_any(proto: &prost_types::Any) -> Result<Self> {
+        pallas_scalar_from_bytes32(&proto.to_msg()?)
+    }
+}
+
+impl DecodeFromAny for u64 {
     fn decode_from_any(proto: &prost_types::Any) -> Result<Self> {
         let scalar = pallas_scalar_from_bytes32(&proto.to_msg()?)?;
         let scalar = utils::pallas_scalar_to_u256(scalar);
