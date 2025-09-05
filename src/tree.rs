@@ -195,7 +195,7 @@ impl MonomorphicPhantomNodes {
 }
 
 static PHANTOM_NODES: LazyLock<MonomorphicPhantomNodes> =
-    LazyLock::new(|| MonomorphicPhantomNodes::default());
+    LazyLock::new(MonomorphicPhantomNodes::default);
 
 #[derive(Debug, Clone)]
 struct Leaf<V: Debug + Default + Clone + Send + Sync + AsScalar + 'static> {
@@ -541,7 +541,7 @@ impl<
             .map(|node| {
                 node.child_hashes
                     .iter()
-                    .map(|hash| proto::pallas_scalar_from_bytes32(hash))
+                    .map(proto::pallas_scalar_from_bytes32)
                     .collect::<Result<Vec<_>>>()?
                     .try_into()
                     .map_err(|vec: Vec<Scalar>| {

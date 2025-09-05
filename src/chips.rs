@@ -140,14 +140,14 @@ impl<const N: usize> BitDecomposerChip<N> {
                     )?;
                     region.constrain_equal(value.cell(), input.cell())?;
                     let mut value = value.value().cloned();
-                    Ok((0..N)
+                    (0..N)
                         .map(|i| {
                             self.config.bit_selector.enable(&mut region, i + 1)?;
                             let bit = value.map(xits::and1);
                             value = value.map(xits::shr1);
                             region.assign_advice(|| "extract_bit", self.config.value, i + 1, || bit)
                         })
-                        .collect::<Result<Vec<_>, _>>()?)
+                        .collect::<Result<Vec<_>, _>>()
                 },
             )?
             .try_into()
@@ -545,7 +545,7 @@ impl FullBitDecomposerChip {
             let mut total = cells.query_advice(value, poly::Rotation(0));
             let mut power = 1.into();
             for i in 1..=256 {
-                let bit = cells.query_advice(value, poly::Rotation(i as i32));
+                let bit = cells.query_advice(value, poly::Rotation(i));
                 total = total - plonk::Expression::Constant(power) * bit;
                 power += power;
             }
@@ -749,7 +749,7 @@ impl FullTritDecomposerChip {
             let mut power = 1.into();
             let three = Scalar::from(3);
             for i in 1..=161 {
-                let trit = cells.query_advice(value, poly::Rotation(i as i32));
+                let trit = cells.query_advice(value, poly::Rotation(i));
                 total = total - plonk::Expression::Constant(power) * trit;
                 power *= three;
             }

@@ -101,7 +101,7 @@ impl Cache {
     }
 }
 
-pub static CACHE: LazyLock<Cache> = LazyLock::new(|| Cache::default());
+pub static CACHE: LazyLock<Cache> = LazyLock::new(Cache::default);
 
 #[cfg(test)]
 mod tests {

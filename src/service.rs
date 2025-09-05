@@ -362,7 +362,7 @@ impl NodeServiceV1 for NodeService {
             Some(signature) => Ok(signature),
             None => Err(Status::invalid_argument("missing transaction signature")),
         }?;
-        keys::KeyManager::verify_signed_message(&payload, &signature)
+        keys::KeyManager::verify_signed_message(payload, signature)
             .map_err(|_| Status::invalid_argument("invalid transaction signature"))?;
         self.inner
             .db
