@@ -944,7 +944,7 @@ impl<
         }
     }
 
-    fn put(&self, key: K, value: V) -> Self {
+    pub fn put(&self, key: K, value: V) -> Self {
         Self {
             root: self.root.clone().put(key, value),
         }
